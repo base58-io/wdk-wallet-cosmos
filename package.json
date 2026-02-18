@@ -1,6 +1,6 @@
 {
   "name": "@base58-io/wdk-wallet-cosmos",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "description": "WDK module to manage BIP-44 wallets for Cosmos-compatible blockchains",
   "keywords": [
     "wdk",
@@ -9,6 +9,14 @@
   ],
   "author": "Base58 <https://base58.io> (contact@base58.io)",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/base58-io/wdk-wallet-cosmos.git"
+  },
+  "bugs": {
+    "url": "https://github.com/base58-io/wdk-wallet-cosmos/issues"
+  },
+  "homepage": "https://github.com/base58-io/wdk-wallet-cosmos#readme",
   "files": [
     "index.js",
     "bare.js",
