@@ -1,0 +1,41 @@
+services:
+  wdk-chain:
+    image: ignitehq/cli:v29.4.0
+    container_name: wdk-chain
+    tty: true
+    working_dir: /apps/wdkdev
+    volumes:
+      - ./ignite-chain/wdkdev:/apps/wdkdev
+      - ./ignite-home:/home/tendermint
+    command: ["chain", "serve", "-p", "wdkdev", "--reset-once"]
+    ports:
+      - "26657:26657" # RPC
+      - "1317:1317" # REST
+      - "9090:9090" # gRPC
+      - "4500:4500" # faucet Ignite
+
+  wdk-chain2:
+    image: ignitehq/cli:v29.4.0
+    container_name: wdk-chain2
+    tty: true
+    working_dir: /apps/wdkdev2
+    volumes:
+      - ./ignite-chain/wdkdev2:/apps/wdkdev2
+      - ./ignite-home2:/home/tendermint
+    command: ["chain", "serve", "-p", "wdkdev2", "--reset-once"]
+    ports:
+      - "26658:26657" # RPC
+      - "1318:1317" # REST
+      - "9091:9090" # gRPC
+      - "4501:4500" # faucet Ignite
+
+  hermes:
+    image: informalsystems/hermes:1.10.0
+    container_name: hermes
+    volumes:
+      - ./hermes:/home/hermes/.hermes
+    depends_on:
+      - wdk-chain
+      - wdk-chain2
+    restart: unless-stopped
+    command: ["start"]

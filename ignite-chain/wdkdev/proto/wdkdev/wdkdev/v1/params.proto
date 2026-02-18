@@ -1,0 +1,13 @@
+syntax = "proto3";
+package wdkdev.wdkdev.v1;
+
+import "amino/amino.proto";
+import "gogoproto/gogo.proto";
+
+option go_package = "wdkdev/x/wdkdev/types";
+
+// Params defines the parameters for the module.
+message Params {
+  option (amino.name) = "wdkdev/x/wdkdev/Params";
+  option (gogoproto.equal) = true;
+}

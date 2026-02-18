@@ -1,0 +1,10 @@
+export { default } from "./src/wallet-manager-cosmos.js";
+export { default as WalletAccountCosmos } from "./src/wallet-account-cosmos.js";
+export type FeeRates = import("@tetherto/wdk-wallet").FeeRates;
+export type KeyPair = import("@tetherto/wdk-wallet").KeyPair;
+export type TransactionResult = import("@tetherto/wdk-wallet").TransactionResult;
+export type TransferOptions = import("@tetherto/wdk-wallet").TransferOptions;
+export type TransferResult = import("@tetherto/wdk-wallet").TransferResult;
+export type CosmosWalletConfig = import("./src/wallet-account-cosmos.js").CosmosWalletConfig;
+export type ResolvedChainConfig = import("./src/chain-config-resolver.js").ResolvedChainConfig;
+export { resolveChainConfig, getAvailableChains, isKnownChain } from "./src/chain-config-resolver.js";

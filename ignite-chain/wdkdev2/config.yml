@@ -1,0 +1,37 @@
+version: 1
+build:
+  binary: wdkdev2d
+genesis:
+  chain_id: wdkdev2
+validation: sovereign
+default_denom: stake
+accounts:
+  - name: alice
+    coins:
+      - 20000token
+      - 200000000stake
+    mnemonic: "car knock victory oval pulse practice draw bulb fiction bulb involve dumb stairs discover update spatial blouse perfect match property wheat defense host fortune"
+  - name: bob
+    coins:
+      - 10000token
+      - 100000000stake
+    mnemonic: "banner spread envelope side kite person disagree path silver will brother under couch edit food venture squirrel civil budget number acquire point work mass"
+  - name: relayer
+    coins:
+      - 10000000stake
+    mnemonic: "thumb subway until asthma diesel visa supply brush relief control amused bonus grace great flavor initial drum loud circle crowd topple box novel biology"
+client:
+  openapi:
+    path: docs/static/openapi.json
+faucet:
+  name: bob
+  coins:
+    - 5token
+    - 100000stake
+validators:
+  - name: alice
+    bonded: 100000000stake
+  - name: validator1
+    bonded: 200000000stake
+  - name: validator2
+    bonded: 100000000stake

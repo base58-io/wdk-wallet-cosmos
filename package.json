@@ -1,0 +1,68 @@
+{
+  "name": "@base58-io/wdk-wallet-cosmos",
+  "version": "1.0.0-beta.1",
+  "description": "WDK module to manage BIP-44 wallets for Cosmos-compatible blockchains",
+  "keywords": [
+    "wdk",
+    "wallet",
+    "cosmos"
+  ],
+  "author": "Base58 <https://base58.io> (contact@base58.io)",
+  "license": "Apache-2.0",
+  "files": [
+    "index.js",
+    "bare.js",
+    "src/",
+    "types/",
+    "!types/tests/",
+    "LICENSE",
+    "README.md"
+  ],
+  "main": "index.js",
+  "type": "module",
+  "types": "./types",
+  "scripts": {
+    "prepublishOnly": "npm run build:types",
+    "build:types": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "bare": "./bare.js",
+      "default": "./index.js"
+    },
+    "./package": {
+      "default": "./package.json"
+    }
+  },
+  "imports": {
+    "crypto": {
+      "bare": "bare-crypto",
+      "default": "crypto"
+    },
+    "crypto/*": {
+      "bare": "bare-crypto/*",
+      "default": "crypto/*"
+    }
+  },
+  "dependencies": {
+    "@cosmjs/crypto": "0.37.0",
+    "@cosmjs/proto-signing": "0.37.0",
+    "@cosmjs/stargate": "0.37.0",
+    "@tetherto/wdk-wallet": "1.0.0-beta.7",
+    "bare-node-runtime": "1.1.4",
+    "bip39": "3.1.0",
+    "chain-registry": "2.0.109",
+    "sodium-universal": "5.0.1"
+  },
+  "devDependencies": {
+    "@types/jest": "30.0.0",
+    "typescript": "5.9.3",
+    "vitest": "3.2.0"
+  },
+  "overrides": {
+    "bare-tls": "2.1.7"
+  }
+}
