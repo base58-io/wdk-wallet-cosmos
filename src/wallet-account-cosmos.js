@@ -1,6 +1,21 @@
 'use strict'
 
-import { Slip10, Slip10Curve, stringToPath } from '@cosmjs/crypto'
+import {
+  decodeSignature,
+  encodeSecp256k1Signature,
+  makeSignDoc,
+  pubkeyToAddress,
+  serializeSignDoc,
+} from '@cosmjs/amino'
+import {
+  Secp256k1,
+  Secp256k1Signature,
+  Slip10,
+  Slip10Curve,
+  sha256,
+  stringToPath,
+} from '@cosmjs/crypto'
+import { fromBase64, toBase64 } from '@cosmjs/encoding'
 import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
 import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
 import * as bip39 from 'bip39'
@@ -52,6 +67,62 @@ const BIP_44_COSMOS_DERIVATION_PATH_PREFIX = "m/44'"
 // Default gas limit for simple token transfers
 // In production, this should be estimated per-transaction via simulation
 const DEFAULT_GAS_LIMIT = DEFAULT_TRANSFER_GAS_LIMIT.toString()
+
+const TEXT_ENCODER = new TextEncoder()
+
+/**
+ * @typedef {import('@cosmjs/amino').StdSignDoc} StdSignDoc
+ */
+
+/**
+ * Builds the ADR-36 sign doc for arbitrary message signing.
+ *
+ * @param {string} signer - The signer address.
+ * @param {string} message - The message to sign.
+ * @returns {StdSignDoc} The ADR-36 sign doc.
+ */
+function buildAdr36SignDoc(signer, message) {
+  return makeSignDoc(
+    [
+      {
+        type: 'sign/MsgSignData',
+        value: {
+          signer,
+          data: toBase64(TEXT_ENCODER.encode(message)),
+        },
+      },
+    ],
+    { amount: [], gas: '0' },
+    '',
+    '',
+    0,
+    0
+  )
+}
+
+/**
+ * Parses a JSON-encoded Cosmos StdSignature.
+ *
+ * @param {string} signature - The signature string.
+ * @returns {import('@cosmjs/amino').StdSignature} The parsed signature.
+ */
+function parseStdSignature(signature) {
+  const parsed = JSON.parse(signature)
+
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    !parsed.pub_key ||
+    typeof parsed.pub_key !== 'object' ||
+    typeof parsed.pub_key.type !== 'string' ||
+    typeof parsed.pub_key.value !== 'string' ||
+    typeof parsed.signature !== 'string'
+  ) {
+    throw new Error('Invalid Cosmos signature')
+  }
+
+  return parsed
+}
 
 /** @implements {IWalletAccount} */
 export default class WalletAccountCosmos {
@@ -528,24 +599,124 @@ export default class WalletAccountCosmos {
   /**
    * Signs a message.
    *
-   * @param {string} _message - The message to sign.
-   * @returns {Promise<string>} The message's signature.
-   * @throws {Error} Not implemented for Cosmos.
+   * Uses ADR-36, the arbitrary message signing format.
+   * The returned string is a JSON-encoded StdSignature.
+   *
+   * @param {string} message - The message to sign.
+   * @returns {Promise<string>} The JSON-encoded Cosmos StdSignature.
    */
-  async sign(_message) {
-    throw new Error('Message signing is not implemented for Cosmos.')
+  async sign(message) {
+    this._assertNotDisposed()
+
+    const signDoc = buildAdr36SignDoc(this._address, message)
+    const messageHash = sha256(serializeSignDoc(signDoc))
+    const signature = Secp256k1.createSignature(
+      messageHash,
+      this._privateKey.buffer
+    )
+    const fixedLengthSignature = new Uint8Array(64)
+    fixedLengthSignature.set(signature.r(32), 0)
+    fixedLengthSignature.set(signature.s(32), 32)
+
+    return JSON.stringify(
+      encodeSecp256k1Signature(this._publicKey, fixedLengthSignature)
+    )
   }
 
   /**
    * Verifies a message's signature.
    *
-   * @param {string} _message - The original message.
-   * @param {string} _signature - The signature to verify.
+   * @param {string} message - The original message.
+   * @param {string} signature - The JSON-encoded Cosmos StdSignature to verify.
    * @returns {Promise<boolean>} True if the signature is valid.
-   * @throws {Error} Not implemented for Cosmos.
    */
-  async verify(_message, _signature) {
-    throw new Error('Message verification is not implemented for Cosmos.')
+  async verify(message, signature) {
+    this._assertNotDisposed()
+
+    try {
+      const stdSignature = parseStdSignature(signature)
+
+      if (
+        pubkeyToAddress(stdSignature.pub_key, this._prefix).toLowerCase() !==
+        this._address.toLowerCase()
+      ) {
+        return false
+      }
+
+      // Ensure signature base64 is well-formed before verifying.
+      fromBase64(stdSignature.signature)
+
+      const { pubkey, signature: signatureBytes } =
+        decodeSignature(stdSignature)
+      const signDoc = buildAdr36SignDoc(this._address, message)
+      const messageHash = sha256(serializeSignDoc(signDoc))
+      const secp256k1Signature =
+        Secp256k1Signature.fromFixedLength(signatureBytes)
+
+      return Secp256k1.verifySignature(
+        secp256k1Signature,
+        messageHash,
+        this._publicKey
+      )
+    } catch (_error) {
+      return false
+    }
+  }
+
+  /**
+   * Signs a transaction without broadcasting it.
+   *
+   * @param {Transaction} transaction - The transaction to sign.
+   * @returns {Promise<unknown>} The signed Cosmos TxRaw transaction.
+   */
+  async signTransaction(transaction) {
+    const cosmosTransaction = this._toCosmosTransaction(transaction)
+    this._assertNotDisposed()
+
+    if (!this._config.rpcEndpoints || this._config.rpcEndpoints.length === 0) {
+      throw new Error(
+        'The wallet must be configured with an RPC endpoint to sign transactions.'
+      )
+    }
+
+    const { gasDenom, gasAmount } = this._parseGasPrice()
+    const fee = {
+      amount: [{ denom: gasDenom, amount: gasAmount }],
+      gas: DEFAULT_GAS_LIMIT,
+    }
+
+    const message = {
+      typeUrl: '/cosmos.bank.v1beta1.MsgSend',
+      value: {
+        fromAddress: this._address,
+        toAddress: cosmosTransaction.to,
+        amount: cosmosTransaction.amount,
+      },
+    }
+
+    const wallet = this._wallet
+    const signerAddress = this._address
+
+    return await withFallback(
+      this._config.rpcEndpoints,
+      async endpoint => {
+        const client = await SigningStargateClient.connectWithSigner(
+          endpoint,
+          wallet
+        )
+
+        return client.sign(
+          signerAddress,
+          [message],
+          fee,
+          cosmosTransaction.memo || ''
+        )
+      },
+      {
+        retryCount: this._config.retryCount,
+        retryDelay: this._config.retryDelay,
+      }
+    )
   }
 
   /**

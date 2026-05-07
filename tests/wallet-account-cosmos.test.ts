@@ -161,6 +161,40 @@ describe('WalletAccountCosmos', () => {
     })
   })
 
+  describe('sign and verify', () => {
+    it('should sign and verify a message', async () => {
+      const message = 'hello cosmos'
+      const signature = await aliceAccount.sign(message)
+      const stdSignature = JSON.parse(signature)
+
+      expect(stdSignature.pub_key).toBeDefined()
+      expect(stdSignature.signature).toBeTypeOf('string')
+      await expect(aliceAccount.verify(message, signature)).resolves.toBe(true)
+    })
+
+    it('should reject a signature for a different message', async () => {
+      const signature = await aliceAccount.sign('hello cosmos')
+
+      await expect(
+        aliceAccount.verify('hello different cosmos', signature)
+      ).resolves.toBe(false)
+    })
+
+    it('should reject malformed signatures', async () => {
+      await expect(
+        aliceAccount.verify('hello cosmos', 'not-json')
+      ).resolves.toBe(false)
+    })
+
+    it("should reject another account's signature", async () => {
+      const signature = await bobAccount.sign('hello cosmos')
+
+      await expect(aliceAccount.verify('hello cosmos', signature)).resolves.toBe(
+        false
+      )
+    })
+  })
+
   describe('getBalance', () => {
     it('should throw if RPC endpoint is not configured', async () => {
       const accountWithoutRpc = await WalletAccountCosmos.create(

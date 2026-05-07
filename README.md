@@ -293,6 +293,8 @@ new WalletAccountCosmos(seed, path, config)
 | `getAddress()`             | Returns the account's address                                                              | `Promise<string>`                      |
 | `transfer(options)`        | Transfers tokens to another address                                                        | `Promise<{hash: string, fee: bigint}>` |
 | `quoteTransfer(options)`   | Estimates the fee for a transfer                                                           | `Promise<{fee: bigint}>`               |
+| `sign(message)`            | Signs a UTF-8 message using Cosmos ADR-36 arbitrary message signing                         | `Promise<string>`                      |
+| `verify(message, sig)`     | Verifies a JSON-encoded Cosmos ADR-36 `StdSignature` against this account                   | `Promise<boolean>`                     |
 | `sendTransaction(tx)`      | Sends a Cosmos transaction payload                                                         | `Promise<{hash: string, fee: bigint}>` |
 | `quoteSendTransaction(tx)` | Estimates the fee for sending a Cosmos transaction payload                                 | `Promise<{fee: bigint}>`               |
 | `getBalance(denom?)`       | Returns the token balance (in base units). Uses `nativeDenom` from config if not specified | `Promise<bigint>`                      |
@@ -318,7 +320,7 @@ Transfers tokens to another address.
 - Fee is derived from gas price metadata and default gas limit (`200000`).
 - If `transferMaxFee` is configured, quote/send operations throw when estimated fee is greater than or equal to this limit.
 
-> **Note**: Message signing (`sign`) and verification (`verify`) methods are not yet implemented for CosmJS. These features may be added in a future release.
+> **Note**: Message signing (`sign`) uses Cosmos ADR-36, compatible with wallet arbitrary-message signing flows such as Keplr `signArbitrary`. It returns a JSON-encoded `StdSignature`; `verify` expects the same format.
 
 ## Supported Networks
 
