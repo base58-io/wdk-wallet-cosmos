@@ -159,20 +159,28 @@ export default class WalletAccountCosmos implements IWalletAccount {
     /**
      * Signs a message.
      *
-     * @param {string} _message - The message to sign.
-     * @returns {Promise<string>} The message's signature.
-     * @throws {Error} Not implemented for Cosmos.
+     * Uses ADR-36, the arbitrary message signing format.
+     * The returned string is a JSON-encoded StdSignature.
+     *
+     * @param {string} message - The message to sign.
+     * @returns {Promise<string>} The JSON-encoded Cosmos StdSignature.
      */
-    sign(_message: string): Promise<string>;
+    sign(message: string): Promise<string>;
     /**
      * Verifies a message's signature.
      *
-     * @param {string} _message - The original message.
-     * @param {string} _signature - The signature to verify.
+     * @param {string} message - The original message.
+     * @param {string} signature - The JSON-encoded Cosmos StdSignature to verify.
      * @returns {Promise<boolean>} True if the signature is valid.
-     * @throws {Error} Not implemented for Cosmos.
      */
-    verify(_message: string, _signature: string): Promise<boolean>;
+    verify(message: string, signature: string): Promise<boolean>;
+    /**
+     * Signs a transaction without broadcasting it.
+     *
+     * @param {Transaction} transaction - The transaction to sign.
+     * @returns {Promise<unknown>} The signed Cosmos TxRaw transaction.
+     */
+    signTransaction(transaction: Transaction): Promise<unknown>;
     /**
      * Sends a transaction.
      *
@@ -234,6 +242,7 @@ export default class WalletAccountCosmos implements IWalletAccount {
      */
     dispose(): void;
 }
+export type StdSignDoc = import("@cosmjs/amino").StdSignDoc;
 export type IWalletAccount = import("@tetherto/wdk-wallet").IWalletAccount;
 export type KeyPair = import("@tetherto/wdk-wallet").KeyPair;
 export type Transaction = import("@tetherto/wdk-wallet").Transaction;

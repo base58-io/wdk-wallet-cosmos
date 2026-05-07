@@ -1,6 +1,6 @@
 {
   "name": "@base58-io/wdk-wallet-cosmos",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.3",
   "description": "WDK module to manage BIP-44 wallets for Cosmos-compatible blockchains",
   "keywords": [
     "wdk",
