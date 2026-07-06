@@ -468,6 +468,20 @@ export default class WalletAccountCosmos {
       gas: DEFAULT_GAS_LIMIT,
     }
 
+    // Enforce transferMaxFee BEFORE broadcasting. The planned fee is
+    // fully determined by _parseGasPrice() above (deterministic from
+    // chain config, no RPC call needed), so we can reject upfront.
+    // Previously this check ran after signAndBroadcast — by then the
+    // tx was already in the mempool (and typically mined), making the
+    // cap unenforceable as a guard.
+    const plannedFee = BigInt(gasAmount)
+    if (
+      this._config.transferMaxFee !== undefined &&
+      plannedFee >= this._config.transferMaxFee
+    ) {
+      throw new Error('Exceeded maximum fee cost for transfer operation.')
+    }
+
     const wallet = this._wallet
     const channelConfig = isSamePrefix
       ? null
@@ -529,14 +543,9 @@ export default class WalletAccountCosmos {
       }
     )
 
+    // fee was pre-validated against transferMaxFee above; re-derive
+    // the bigint here just for the result shape.
     const totalFee = BigInt(fee.amount[0].amount)
-
-    if (
-      this._config.transferMaxFee !== undefined &&
-      totalFee >= this._config.transferMaxFee
-    ) {
-      throw new Error('Exceeded maximum fee cost for transfer operation.')
-    }
 
     return {
       hash: result.transactionHash,
