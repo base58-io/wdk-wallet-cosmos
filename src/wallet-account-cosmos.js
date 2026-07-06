@@ -15,7 +15,7 @@ import {
   sha256,
   stringToPath,
 } from '@cosmjs/crypto'
-import { fromBase64, toBase64 } from '@cosmjs/encoding'
+import { fromBase64, fromBech32, toBase64 } from '@cosmjs/encoding'
 import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
 import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
 import * as bip39 from 'bip39'
@@ -28,6 +28,12 @@ import {
 } from './gas-fee-utils.js'
 import SecureBuffer from './memory-safe/secure-buffer.js'
 import { withFallback } from './rpc-fallback.js'
+import { createThorMayaRegistry } from './proto/registry.js'
+import {
+  TYPE_URL_MSG_DEPOSIT,
+  parseAssetString,
+  Coin,
+} from './proto/thorchain-types.js'
 
 /** @typedef {import('@tetherto/wdk-wallet').IWalletAccount} IWalletAccount */
 /** @typedef {import('@tetherto/wdk-wallet').KeyPair} KeyPair */
@@ -759,6 +765,108 @@ export default class WalletAccountCosmos {
           fee,
           cosmosTransaction.memo
         )
+      },
+      {
+        retryCount: this._config.retryCount,
+        retryDelay: this._config.retryDelay,
+      }
+    )
+
+    return {
+      hash: result.transactionHash,
+      fee: BigInt(fee.amount[0].amount),
+    }
+  }
+
+  /**
+   * Sign and broadcast a THORChain / MAYAChain `MsgDeposit` against the
+   * connected RPC.
+   *
+   * This is the canonical way to initiate a swap from native RUNE /
+   * CACAO. The existing `sendTransaction` / `transfer` methods emit
+   * bank-module `MsgSend`, which won't trigger a swap on THORChain /
+   * MAYAChain even with a memo attached — those chains only observe
+   * `MsgDeposit` for the swap-observer path.
+   *
+   * @param {Object} options
+   * @param {string} options.asset - SwapKit-style asset string of the
+   *   coin being deposited, e.g. `"THOR.RUNE"` or `"MAYA.CACAO"`.
+   * @param {bigint | string} options.amount - Amount in the asset's
+   *   1e8 base units (e.g. `100000000n` for 1 RUNE).
+   * @param {string} options.memo - THORChain swap memo, e.g.
+   *   `"=:BTC.BTC:bc1q…:0/1/0"`. Required — an empty memo would encode
+   *   an unroutable deposit.
+   * @param {Object} [overrides] - Optional fee overrides.
+   * @param {string} [overrides.gas] - Custom gas limit (default:
+   *   `DEFAULT_TRANSFER_GAS_LIMIT`). Deposit txs sometimes need more
+   *   gas than a plain MsgSend; bump this if a tx fails with
+   *   "out of gas".
+   * @returns {Promise<TransactionResult>}
+   */
+  async deposit({ asset, amount, memo }, overrides = {}) {
+    this._assertNotDisposed()
+
+    if (!this._config.rpcEndpoints || this._config.rpcEndpoints.length === 0) {
+      throw new Error(
+        'The wallet must be configured with an RPC endpoint to send transactions.'
+      )
+    }
+    if (!asset) throw new Error('deposit: asset is required.')
+    if (amount === undefined || amount === null) {
+      throw new Error('deposit: amount is required.')
+    }
+    if (typeof memo !== 'string' || memo.length === 0) {
+      throw new Error('deposit: memo is required and must be a non-empty string.')
+    }
+
+    const senderAddress = this._address
+    const { data: signerBytes } = fromBech32(senderAddress)
+
+    const coin = Coin.fromPartial({
+      asset: parseAssetString(asset),
+      amount: String(amount),
+      decimals: BigInt(0), // THORChain accepts 0; the asset's native scale is implied
+    })
+
+    const msg = {
+      typeUrl: TYPE_URL_MSG_DEPOSIT,
+      value: {
+        coins: [coin],
+        memo,
+        signer: signerBytes,
+      },
+    }
+
+    const { gasDenom, gasAmount } = this._parseGasPrice()
+    const fee = {
+      amount: [{ denom: gasDenom, amount: gasAmount }],
+      gas: String(overrides.gas ?? DEFAULT_TRANSFER_GAS_LIMIT),
+    }
+
+    // Enforce transferMaxFee BEFORE broadcasting — the fee is
+    // deterministic from chain config, so the check is meaningful only
+    // upstream of signAndBroadcast. See the sibling change on
+    // transfer() (separate PR) for the same rationale.
+    const plannedFee = BigInt(gasAmount)
+    if (
+      this._config.transferMaxFee !== undefined &&
+      plannedFee >= this._config.transferMaxFee
+    ) {
+      throw new Error('Exceeded maximum fee cost for deposit operation.')
+    }
+
+    const wallet = this._wallet
+    const registry = createThorMayaRegistry()
+
+    const result = await withFallback(
+      this._config.rpcEndpoints,
+      async endpoint => {
+        const client = await SigningStargateClient.connectWithSigner(
+          endpoint,
+          wallet,
+          { registry }
+        )
+        return client.signAndBroadcast(senderAddress, [msg], fee, memo)
       },
       {
         retryCount: this._config.retryCount,
