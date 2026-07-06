@@ -439,7 +439,12 @@ export default class WalletAccountCosmos {
   /**
    * Transfers tokens to another address.
    *
-   * @param {TransferOptions} options - The transfer's options.
+   * @param {TransferOptions & { memo?: string }} options - The transfer's
+   *   options. When `memo` is set, it overrides the default tx memo
+   *   (`'Transfer via WDK'` for same-prefix transfers, `'Transfer via
+   *   WDK (IBC)'` for IBC). Required for THORChain/MAYAChain swap
+   *   deposits routed via `MsgSend` to an inbound vault, where the
+   *   memo encodes the swap intent and an empty memo would lose funds.
    * @returns {Promise<TransferResult>} The transfer's result.
    */
   async transfer(options) {
@@ -451,7 +456,7 @@ export default class WalletAccountCosmos {
       )
     }
 
-    const { token, recipient, amount } = options
+    const { token, recipient, amount, memo } = options
     const address = await this.getAddress()
 
     const recipientPrefix = this._getBech32Prefix(recipient)
@@ -487,7 +492,7 @@ export default class WalletAccountCosmos {
             recipient,
             [sendAmount],
             fee,
-            'Transfer via WDK'
+            memo ?? 'Transfer via WDK'
           )
         }
 
@@ -496,6 +501,7 @@ export default class WalletAccountCosmos {
           (Date.now() + timeoutSeconds * 1000) * 1_000_000
         )
 
+        const ibcMemo = memo ?? 'Transfer via WDK (IBC)'
         const msgTransfer = {
           typeUrl: '/ibc.applications.transfer.v1.MsgTransfer',
           value: {
@@ -508,7 +514,7 @@ export default class WalletAccountCosmos {
             receiver: recipient,
             timeoutHeight: undefined,
             timeoutTimestamp: timeoutTimestampNanoseconds,
-            memo: 'Transfer via WDK (IBC)',
+            memo: ibcMemo,
           },
         }
 
@@ -516,7 +522,7 @@ export default class WalletAccountCosmos {
           address,
           [msgTransfer],
           fee,
-          'Transfer via WDK (IBC)'
+          ibcMemo
         )
 
         return {
