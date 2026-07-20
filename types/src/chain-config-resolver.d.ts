@@ -9,6 +9,7 @@
  * @property {number} [coinType] - The BIP-44 coin type (overrides registry, default: 118).
  * @property {string} [gasPrice] - The gas price with denom (e.g. '0.025uatom').
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
+ * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
  */
 /**
@@ -22,6 +23,7 @@
  * @property {string} [gasPrice] - The gas price with denom.
  * @property {{ low: number, average: number, high: number, denom: string }} [gasPriceStep] - Gas price tiers from chain-registry fee token metadata.
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
+ * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {string} [chainId] - The chain ID (from registry).
  * @property {string} [prettyName] - The human-readable chain name (from registry).
  * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
@@ -104,6 +106,10 @@ export type CosmosWalletConfig = {
      */
     transferMaxFee?: number | bigint | undefined;
     /**
+     * - The maximum fee amount for transaction operations.
+     */
+    transactionMaxFee?: number | bigint | undefined;
+    /**
      * - Optional IBC channel map keyed by destination Bech32 prefix.
      */
     ibcChannels?: Record<string, {
@@ -152,6 +158,10 @@ export type ResolvedChainConfig = {
      * - The maximum fee amount for transfer operations.
      */
     transferMaxFee?: number | bigint | undefined;
+    /**
+     * - The maximum fee amount for transaction operations.
+     */
+    transactionMaxFee?: number | bigint | undefined;
     /**
      * - The chain ID (from registry).
      */

@@ -39,6 +39,7 @@ npm install @base58-io/wdk-wallet-cosmos
 
 ```javascript
 import WalletManagerCosmos, {
+  SeedSignerCosmos,
   WalletAccountCosmos,
 } from '@base58-io/wdk-wallet-cosmos'
 
@@ -63,6 +64,14 @@ const localWallet = new WalletManagerCosmos(seedPhrase, {
 const hybridWallet = new WalletManagerCosmos(seedPhrase, {
   chainName: 'osmosis',
   rpcEndpoints: ['https://my-primary-rpc.com', 'https://my-backup-rpc.com'],
+})
+
+// Option 4: Use a derivable Cosmos signer
+const signer = new SeedSignerCosmos(seedPhrase, {
+  chainName: 'cosmoshub',
+})
+const signerWallet = new WalletManagerCosmos(signer, {
+  chainName: 'cosmoshub',
 })
 
 // Get a full access account
@@ -90,6 +99,16 @@ console.log('Account 1 address:', address1)
 const customAccount = await wallet.getAccountByPath("0'/0/5")
 const customAddress = await customAccount.getAddress()
 console.log('Custom account address:', customAddress)
+
+// Register another derivable signer and select it by name
+wallet.addSigner('hardware', hardwareSigner)
+const hardwareAccount = await wallet.getAccount(0, {
+  signerName: 'hardware',
+})
+
+// A named non-derivable signer represents one account directly
+wallet.addSigner('account', accountSigner)
+const signerAccount = await wallet.getAccount('account')
 
 // Note: All addresses are Bech32 Cosmos addresses (cosmos1...)
 // All accounts inherit the configuration from the wallet manager
@@ -181,7 +200,8 @@ wallet.dispose()
 | Class                                       | Description                                                                                               | Methods                                              |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | [WalletManagerCosmos](#walletmanagercosmos) | Main class for managing Cosmos wallets. Extends `WalletManager` from `@tetherto/wdk-wallet`.              | [Constructor](#constructor), [Methods](#methods)     |
-| [WalletAccountCosmos](#walletaccountcosmos) | Individual Cosmos wallet account implementation. Implements `IWalletAccount` from `@tetherto/wdk-wallet`. | [Constructor](#constructor-1), [Methods](#methods-1) |
+| [WalletAccountCosmos](#walletaccountcosmos) | Individual Cosmos wallet account implementation. Implements `IWalletAccount<TxRaw>`.                        | [Creation](#creation), [Methods](#methods-1)          |
+| `SeedSignerCosmos`                          | Memory-safe, derivable Cosmos signer backed by a BIP-39 seed.                                               | `derive`, `getAddress`, `sign`, `dispose`             |
 
 ### WalletManagerCosmos
 
@@ -191,12 +211,12 @@ Extends `WalletManager` from `@tetherto/wdk-wallet`.
 #### Constructor
 
 ```javascript
-new WalletManagerCosmos(seed, config)
+new WalletManagerCosmos(seedOrSigner, config)
 ```
 
 **Parameters:**
 
-- `seed` (string | Uint8Array): BIP-39 mnemonic seed phrase or seed bytes
+- `seedOrSigner` (string | Uint8Array | ISignerCosmos): BIP-39 mnemonic, seed bytes, or a derivable Cosmos signer
 - `config` (object, optional): Configuration object
   - `chainName` (string, optional): Chain name from chain-registry (e.g. "cosmoshub", "osmosis", "juno")
   - `rpcEndpoints` (string[], optional): Array of RPC endpoint URLs for fallback (overrides registry)
@@ -207,6 +227,7 @@ new WalletManagerCosmos(seed, config)
   - `coinType` (number, optional): BIP-44 coin type (overrides registry, default: 118)
   - `gasPrice` (string, optional): Gas price with denom (e.g. "0.025uatom")
   - `transferMaxFee` (number | bigint, optional): Maximum fee amount for transfer operations
+  - `transactionMaxFee` (number | bigint, optional): Maximum fee amount for transaction operations
 
 **Example:**
 
@@ -229,8 +250,9 @@ const wallet = new WalletManagerCosmos(seedPhrase, {
 
 | Method                   | Description                                                      | Returns                                   |
 | ------------------------ | ---------------------------------------------------------------- | ----------------------------------------- |
-| `getAccount(index)`      | Returns a wallet account at the specified index                  | `Promise<WalletAccountCosmos>`            |
-| `getAccountByPath(path)` | Returns a wallet account at the specified BIP-44 derivation path | `Promise<WalletAccountCosmos>`            |
+| `getAccount(index, options?)`      | Returns an account, optionally using `options.signerName`         | `Promise<WalletAccountCosmos>`            |
+| `getAccount(signerName)`           | Returns the account represented by a named signer                 | `Promise<WalletAccountCosmos>`            |
+| `getAccountByPath(path, options?)` | Returns an account by path, optionally using `options.signerName` | `Promise<WalletAccountCosmos>`            |
 | `getFeeRates()`          | Returns current fee rates for transactions                       | `Promise<{normal: bigint, fast: bigint}>` |
 | `dispose()`              | Disposes all wallet accounts, clearing private keys from memory  | `void`                                    |
 
@@ -263,18 +285,22 @@ const notExists = isKnownChain('mylocal') // false
 
 ### WalletAccountCosmos
 
-Represents an individual wallet account. Implements `IWalletAccount` from `@tetherto/wdk-wallet`.
+Represents an individual wallet account. Implements `IWalletAccount<TxRaw>` from `@tetherto/wdk-wallet`.
 
-#### Constructor
+#### Creation
+
+Create accounts through `WalletManagerCosmos`, or directly with the asynchronous factories:
 
 ```javascript
-new WalletAccountCosmos(seed, path, config)
+const account = await WalletAccountCosmos.create(seed, "0'/0/0", config)
+const signerAccount = await WalletAccountCosmos.fromSigner(signer, config)
 ```
 
 **Parameters:**
 
 - `seed` (string | Uint8Array): BIP-39 mnemonic seed phrase or seed bytes
-- `path` (string): BIP-44 derivation path (e.g., "0'/0/0")
+- `signer` (ISignerCosmos): Initialized Cosmos signer
+- `path` (string): Relative BIP-44 derivation path (e.g., "0'/0/0")
 - `config` (object, optional): Configuration object (same as WalletManagerCosmos)
   - `chainName` (string, optional): Chain name from chain-registry
   - `rpcEndpoints` (string[], optional): Array of RPC endpoint URLs for fallback
@@ -284,7 +310,8 @@ new WalletAccountCosmos(seed, path, config)
   - `nativeDenom` (string, optional): Native token denomination
   - `coinType` (number, optional): BIP-44 coin type
   - `gasPrice` (string, optional): Gas price with denom
-  - `transferMaxFee` (number | bigint, optional): Maximum fee amount
+  - `transferMaxFee` (number | bigint, optional): Maximum transfer fee amount
+  - `transactionMaxFee` (number | bigint, optional): Maximum transaction fee amount
 
 #### Methods
 
@@ -295,8 +322,9 @@ new WalletAccountCosmos(seed, path, config)
 | `quoteTransfer(options)`   | Estimates the fee for a transfer                                                           | `Promise<{fee: bigint}>`               |
 | `sign(message)`            | Signs a UTF-8 message using Cosmos ADR-36 arbitrary message signing                         | `Promise<string>`                      |
 | `verify(message, sig)`     | Verifies a JSON-encoded Cosmos ADR-36 `StdSignature` against this account                   | `Promise<boolean>`                     |
-| `sendTransaction(tx)`      | Sends a Cosmos transaction payload                                                         | `Promise<{hash: string, fee: bigint}>` |
-| `quoteSendTransaction(tx)` | Estimates the fee for sending a Cosmos transaction payload                                 | `Promise<{fee: bigint}>`               |
+| `signTransaction(tx)`      | Signs a transaction and returns a Cosmos `TxRaw`                                            | `Promise<TxRaw>`                       |
+| `sendTransaction(tx)`      | Sends an unsigned transaction or broadcasts a signed `TxRaw`                               | `Promise<{hash: string, fee: bigint}>` |
+| `quoteSendTransaction(tx)` | Estimates an unsigned fee or reads the fee from a signed `TxRaw`                            | `Promise<{fee: bigint}>`               |
 | `getBalance(denom?)`       | Returns the token balance (in base units). Uses `nativeDenom` from config if not specified | `Promise<bigint>`                      |
 | `getTokenBalance(denom)`   | Returns the balance of a specific token                                                    | `Promise<bigint>`                      |
 | `getTokenBalances(denoms)` | Returns balances of multiple specified tokens                                              | `Promise<Record<string, bigint>>`      |
@@ -318,7 +346,9 @@ Transfers tokens to another address.
 ##### Fee estimation behavior
 
 - Fee is derived from gas price metadata and default gas limit (`200000`).
-- If `transferMaxFee` is configured, quote/send operations throw when estimated fee is greater than or equal to this limit.
+- `transferMaxFee` applies only to `transfer` and `quoteTransfer`.
+- `transactionMaxFee` applies to signing, sending, and quoting transactions.
+- Operations throw before signing or broadcasting when their fee exceeds the configured limit.
 
 > **Note**: Message signing (`sign`) uses Cosmos ADR-36, compatible with wallet arbitrary-message signing flows such as Keplr `signArbitrary`. It returns a JSON-encoded `StdSignature`; `verify` expects the same format.
 
@@ -338,7 +368,7 @@ This package works with Cosmos-compatible blockchains, including:
 - **RPC Security**: Use trusted RPC endpoints and consider running your own node for production
 - **Transaction Validation**: Always validate transaction details before signing
 - **Memory Cleanup**: Use the `dispose()` method to clear private keys from memory when done
-- **Fee Limits**: Set `transferMaxFee` in config to prevent excessive transaction fees
+- **Fee Limits**: Set `transferMaxFee` and `transactionMaxFee` to prevent excessive fees
 
 ### Memory-Safe Key Handling
 
@@ -383,7 +413,7 @@ import WalletManagerCosmos from '@base58-io/wdk-wallet-cosmos'
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20.19+
 - Docker (for local testnet)
 
 ### Installation

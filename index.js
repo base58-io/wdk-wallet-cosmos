@@ -14,6 +14,11 @@ export { default } from "./src/wallet-manager-cosmos.js";
 export { default as WalletAccountCosmos } from "./src/wallet-account-cosmos.js";
 
 export {
+  default as SeedSignerCosmos,
+  ISignerCosmos,
+} from "./src/signers/seed-signer-cosmos.js";
+
+export {
   resolveChainConfig,
   getAvailableChains,
   isKnownChain,

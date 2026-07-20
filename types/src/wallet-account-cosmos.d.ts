@@ -10,16 +10,20 @@ export default class WalletAccountCosmos implements IWalletAccount {
      */
     static create(seed: string | Uint8Array, path: string, config?: CosmosWalletConfig): Promise<WalletAccountCosmos>;
     /**
-     * Use WalletAccountCosmos.create() instead of constructor.
+     * Creates a wallet account from an initialized Cosmos signer.
      *
-     * @param {DirectSecp256k1Wallet} wallet - The initialized wallet.
-     * @param {SecureBuffer} privateKey - The private key in secure buffer.
-     * @param {Uint8Array} publicKey - The public key.
-     * @param {string} address - The account address.
-     * @param {string} path - The full derivation path.
+     * @param {ISignerCosmos} signer - The Cosmos signer.
+     * @param {CosmosWalletConfig} [config] - The configuration object.
+     * @returns {Promise<WalletAccountCosmos>} The wallet account instance.
+     */
+    static fromSigner(signer: ISignerCosmos, config?: CosmosWalletConfig): Promise<WalletAccountCosmos>;
+    /**
+     * Creates an account backed by a Cosmos signer.
+     *
+     * @param {ISignerCosmos} signer - The initialized Cosmos signer.
      * @param {ResolvedChainConfig} resolvedConfig - The resolved configuration object.
      */
-    constructor(wallet: DirectSecp256k1Wallet, privateKey: SecureBuffer, publicKey: Uint8Array, address: string, path: string, resolvedConfig: ResolvedChainConfig);
+    constructor(signer: ISignerCosmos, resolvedConfig: ResolvedChainConfig);
     /**
      * The resolved wallet configuration.
      *
@@ -28,13 +32,6 @@ export default class WalletAccountCosmos implements IWalletAccount {
      */
     protected _config: ResolvedChainConfig;
     /**
-     * The full derivation path.
-     *
-     * @protected
-     * @type {string}
-     */
-    protected _path: string;
-    /**
      * The address prefix for Bech32 encoding.
      *
      * @protected
@@ -42,33 +39,12 @@ export default class WalletAccountCosmos implements IWalletAccount {
      */
     protected _prefix: string;
     /**
-     * The wallet instance.
+     * The signer used by this account.
      *
      * @protected
-     * @type {DirectSecp256k1Wallet}
+     * @type {ISignerCosmos}
      */
-    protected _wallet: DirectSecp256k1Wallet;
-    /**
-     * The derived private key in a memory-safe buffer.
-     *
-     * @protected
-     * @type {SecureBuffer}
-     */
-    protected _privateKey: SecureBuffer;
-    /**
-     * The public key.
-     *
-     * @protected
-     * @type {Uint8Array}
-     */
-    protected _publicKey: Uint8Array;
-    /**
-     * The account address.
-     *
-     * @protected
-     * @type {string}
-     */
-    protected _address: string;
+    protected _signer: ISignerCosmos;
     /**
      * Whether this account has been disposed.
      *
@@ -178,16 +154,16 @@ export default class WalletAccountCosmos implements IWalletAccount {
      * Signs a transaction without broadcasting it.
      *
      * @param {Transaction} transaction - The transaction to sign.
-     * @returns {Promise<unknown>} The signed Cosmos TxRaw transaction.
+     * @returns {Promise<TxRaw>} The signed Cosmos transaction.
      */
-    signTransaction(transaction: Transaction): Promise<unknown>;
+    signTransaction(transaction: Transaction): Promise<TxRaw>;
     /**
-     * Sends a transaction.
+     * Sends an unsigned or previously signed transaction.
      *
-     * @param {Transaction} transaction - The transaction to send (use CosmosTransaction format).
+     * @param {Transaction | TxRaw} transaction - The transaction to send.
      * @returns {Promise<TransactionResult>} The transaction's result.
      */
-    sendTransaction(transaction: Transaction): Promise<TransactionResult>;
+    sendTransaction(transaction: Transaction | TxRaw): Promise<TransactionResult>;
     /**
      * Converts a generic transaction to a Cosmos transaction.
      *
@@ -203,14 +179,37 @@ export default class WalletAccountCosmos implements IWalletAccount {
      */
     toReadOnlyAccount(): Promise<IWalletAccountReadOnly>;
     /**
-     * Quotes the cost of sending a transaction.
+     * Quotes the cost of sending an unsigned or signed transaction.
      *
-     * @param {Transaction} _transaction - The transaction to quote (use CosmosTransaction format).
+     * @param {Transaction | TxRaw} transaction - The transaction to quote.
      * @returns {Promise<{fee: bigint}>} The estimated fee.
      */
-    quoteSendTransaction(_transaction: Transaction): Promise<{
+    quoteSendTransaction(transaction: Transaction | TxRaw): Promise<{
         fee: bigint;
     }>;
+    /**
+     * Checks whether a transaction is an encoded Cosmos TxRaw object.
+     *
+     * @param {Transaction | TxRaw} transaction - The transaction to inspect.
+     * @returns {boolean} Whether the transaction is signed.
+     * @private
+     */
+    private _isSignedTransaction;
+    /**
+     * Reads the total fee from an encoded signed transaction.
+     *
+     * @param {Uint8Array} transactionBytes - Encoded TxRaw bytes.
+     * @returns {bigint} The total transaction fee.
+     * @private
+     */
+    private _getSignedTransactionFee;
+    /**
+     * Enforces the configured transaction fee limit.
+     *
+     * @param {bigint} fee - Transaction fee in base units.
+     * @private
+     */
+    private _assertTransactionFeeWithinLimit;
     /**
      * Returns the transaction receipt for a given transaction hash.
      *
@@ -243,13 +242,14 @@ export default class WalletAccountCosmos implements IWalletAccount {
     dispose(): void;
 }
 export type StdSignDoc = import("@cosmjs/amino").StdSignDoc;
-export type IWalletAccount = import("@tetherto/wdk-wallet").IWalletAccount;
+export type IWalletAccount = import("@tetherto/wdk-wallet").IWalletAccount<TxRaw>;
 export type KeyPair = import("@tetherto/wdk-wallet").KeyPair;
 export type Transaction = import("@tetherto/wdk-wallet").Transaction;
 export type TransactionResult = import("@tetherto/wdk-wallet").TransactionResult;
 export type TransferOptions = import("@tetherto/wdk-wallet").TransferOptions;
 export type TransferResult = import("@tetherto/wdk-wallet").TransferResult;
 export type IWalletAccountReadOnly = import("@tetherto/wdk-wallet").IWalletAccountReadOnly;
+export type ISignerCosmos = import("./signers/seed-signer-cosmos.js").ISignerCosmos;
 export type CosmosTransaction = {
     /**
      * - The recipient address.
@@ -305,6 +305,10 @@ export type CosmosWalletConfig = {
      */
     transferMaxFee?: number | bigint | undefined;
     /**
+     * - The maximum fee amount for transaction operations.
+     */
+    transactionMaxFee?: number | bigint | undefined;
+    /**
      * - Optional IBC channel map keyed by destination Bech32 prefix.
      */
     ibcChannels?: Record<string, {
@@ -312,5 +316,4 @@ export type CosmosWalletConfig = {
     }> | undefined;
 };
 export type ResolvedChainConfig = import("./chain-config-resolver.js").ResolvedChainConfig;
-import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing';
-import SecureBuffer from './memory-safe/secure-buffer.js';
+import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx';

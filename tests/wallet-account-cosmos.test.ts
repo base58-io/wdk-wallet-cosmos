@@ -1,7 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as bip39 from 'bip39'
 import WalletManagerCosmos, { WalletAccountCosmos } from '../index.js'
 import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
+import { StargateClient } from '@cosmjs/stargate'
+import {
+  AuthInfo,
+  TxRaw,
+} from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import { createHash } from 'crypto'
 import {
   DEFAULT_TRANSFER_GAS_LIMIT,
@@ -51,6 +56,24 @@ const BOB_ADDRESS = 'wdk1m9l358xunhhwds0568za49mzhvuxx9uxv52xme'
 const BOB_ADDRESS_CHAIN_2 = 'wdk21m9l358xunhhwds0568za49mzhvuxx9uxs7puwd'
 
 const DEFAULT_TEST_GAS_PRICE_AMOUNT = 0.025
+
+function createSignedTransaction(fee: string): TxRaw {
+  return TxRaw.fromPartial({
+    bodyBytes: new Uint8Array(),
+    authInfoBytes: AuthInfo.encode(
+      AuthInfo.fromPartial({
+        signerInfos: [],
+        fee: {
+          amount: [{ denom: 'stake', amount: fee }],
+          gasLimit: BigInt(DEFAULT_TRANSFER_GAS_LIMIT),
+          payer: '',
+          granter: '',
+        },
+      })
+    ).finish(),
+    signatures: [new Uint8Array()],
+  })
+}
 
 function resolveIbcDenom(sourceChannel: string, baseDenom: string): string {
   const denomTrace = `transfer/${sourceChannel}/${baseDenom}`
@@ -309,6 +332,70 @@ describe('WalletAccountCosmos', () => {
 
       expect(expectedFee).toBeDefined()
       expect(quote.fee).toBe(expectedFee)
+    })
+  })
+
+  describe('quoteSendTransaction', () => {
+    it('should quote the fee encoded in a signed transaction', async () => {
+      const quote = await aliceAccount.quoteSendTransaction(
+        createSignedTransaction('123')
+      )
+
+      expect(quote.fee).toBe(BigInt(123))
+    })
+
+    it('should enforce transactionMaxFee for unsigned transactions', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        ...IBC_CHAIN_1_CONFIG,
+        transactionMaxFee: 1,
+      })
+      const account = await wallet.getAccount(0)
+
+      await expect(
+        account.quoteSendTransaction({
+          to: BOB_ADDRESS,
+          value: 1000,
+        })
+      ).rejects.toThrow('Exceeded maximum fee cost for transaction operation.')
+
+      wallet.dispose()
+    })
+
+    it('should broadcast a signed transaction', async () => {
+      const broadcastTx = vi.fn().mockResolvedValue({
+        transactionHash: 'SIGNED_TRANSACTION_HASH',
+      })
+      const connect = vi
+        .spyOn(StargateClient, 'connect')
+        .mockResolvedValue({ broadcastTx } as never)
+
+      try {
+        const result = await aliceAccount.sendTransaction(
+          createSignedTransaction('123')
+        )
+
+        expect(result).toEqual({
+          hash: 'SIGNED_TRANSACTION_HASH',
+          fee: BigInt(123),
+        })
+        expect(broadcastTx).toHaveBeenCalledOnce()
+      } finally {
+        connect.mockRestore()
+      }
+    })
+
+    it('should enforce transactionMaxFee before broadcasting a signed transaction', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        ...IBC_CHAIN_1_CONFIG,
+        transactionMaxFee: 100,
+      })
+      const account = await wallet.getAccount(0)
+
+      await expect(
+        account.sendTransaction(createSignedTransaction('123'))
+      ).rejects.toThrow('Exceeded maximum fee cost for transaction operation.')
+
+      wallet.dispose()
     })
   })
 

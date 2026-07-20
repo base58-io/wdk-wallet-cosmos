@@ -7,4 +7,5 @@ export type TransferOptions = import("@tetherto/wdk-wallet").TransferOptions;
 export type TransferResult = import("@tetherto/wdk-wallet").TransferResult;
 export type CosmosWalletConfig = import("./src/wallet-account-cosmos.js").CosmosWalletConfig;
 export type ResolvedChainConfig = import("./src/chain-config-resolver.js").ResolvedChainConfig;
+export { default as SeedSignerCosmos, ISignerCosmos } from "./src/signers/seed-signer-cosmos.js";
 export { resolveChainConfig, getAvailableChains, isKnownChain } from "./src/chain-config-resolver.js";

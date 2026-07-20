@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import * as bip39 from 'bip39'
-import WalletManagerCosmos, { WalletAccountCosmos } from '../index.js'
+import WalletManagerCosmos, {
+  SeedSignerCosmos,
+  WalletAccountCosmos,
+} from '../index.js'
 import {
   DEFAULT_GAS_PRICE_STEP,
   DEFAULT_TRANSFER_GAS_LIMIT,
@@ -46,6 +49,22 @@ describe('WalletManagerCosmos', () => {
       expect(testWallet).toBeInstanceOf(WalletManagerCosmos)
       expect(testWallet.isDisposed).toBe(false)
       expect(address).toBe(ALICE_ADDRESS)
+
+      testWallet.dispose()
+    })
+
+    it('should successfully initialize a wallet with a Cosmos signer', async () => {
+      const signer = new SeedSignerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+      const testWallet = new WalletManagerCosmos(signer, {
+        addressPrefix: 'wdk',
+      })
+
+      const account = await testWallet.getAccount(0)
+
+      expect(await account.getAddress()).toBe(ALICE_ADDRESS)
+      expect(testWallet.getSigner()).toBe(signer)
 
       testWallet.dispose()
     })
@@ -106,6 +125,36 @@ describe('WalletManagerCosmos', () => {
       const account2 = await wallet.getAccount(0)
 
       expect(account1).toBe(account2)
+    })
+
+    it('should isolate accounts derived by different named signers', async () => {
+      const namedSigner = new SeedSignerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+      wallet.addSigner('cosmos', namedSigner)
+
+      const defaultAccount = await wallet.getAccount(0)
+      const namedAccount = await wallet.getAccount(0, {
+        signerName: 'cosmos',
+      })
+
+      expect(defaultAccount).not.toBe(namedAccount)
+      expect(await defaultAccount.getAddress()).toBe(ALICE_ADDRESS)
+      expect(await namedAccount.getAddress()).toBe(ALICE_ADDRESS)
+    })
+
+    it('should return the account associated with a named signer', async () => {
+      const rootSigner = new SeedSignerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+      const accountSigner = await rootSigner.derive("0'/0/1")
+      rootSigner.dispose()
+      wallet.addSigner('account', accountSigner)
+
+      const account = await wallet.getAccount('account')
+
+      expect(await account.getAddress()).toBe(ALICE_ADDRESS_INDEX_1)
+      expect(await wallet.getAccount('account')).toBe(account)
     })
 
     it('should throw if the index is a negative number', async () => {
@@ -202,6 +251,18 @@ describe('WalletManagerCosmos', () => {
       await expect(testWallet.getAccount(0)).rejects.toThrow(
         'Cannot use disposed wallet manager'
       )
+    })
+
+    it('should dispose registered signers', () => {
+      const signer = new SeedSignerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+      const testWallet = new WalletManagerCosmos(ALICE_MNEMONIC, {})
+      testWallet.addSigner('other', signer)
+
+      testWallet.dispose()
+
+      expect(signer.isDerivable).toBe(false)
     })
 
     it('should be idempotent (calling dispose multiple times is safe)', () => {

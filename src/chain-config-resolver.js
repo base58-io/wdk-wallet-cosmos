@@ -30,6 +30,7 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
  * @property {number} [coinType] - The BIP-44 coin type (overrides registry, default: 118).
  * @property {string} [gasPrice] - The gas price with denom (e.g. '0.025uatom').
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
+ * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
  */
 
@@ -44,6 +45,7 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
  * @property {string} [gasPrice] - The gas price with denom.
  * @property {{ low: number, average: number, high: number, denom: string }} [gasPriceStep] - Gas price tiers from chain-registry fee token metadata.
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
+ * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {string} [chainId] - The chain ID (from registry).
  * @property {string} [prettyName] - The human-readable chain name (from registry).
  * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
@@ -87,6 +89,7 @@ export function resolveChainConfig(config = {}) {
       coinType: config.coinType ?? 118,
       gasPrice: config.gasPrice,
       transferMaxFee: config.transferMaxFee,
+      transactionMaxFee: config.transactionMaxFee,
       ibcChannels: config.ibcChannels,
     }
   }
@@ -144,6 +147,7 @@ export function resolveChainConfig(config = {}) {
     gasPrice: config.gasPrice || defaultGasPrice,
     gasPriceStep: defaultGasPriceStep,
     transferMaxFee: config.transferMaxFee,
+    transactionMaxFee: config.transactionMaxFee,
     ibcChannels: config.ibcChannels,
     chainId: chainData.chainId,
     prettyName: chainData.prettyName,

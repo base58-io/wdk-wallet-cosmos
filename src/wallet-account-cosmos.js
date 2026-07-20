@@ -2,23 +2,15 @@
 
 import {
   decodeSignature,
-  encodeSecp256k1Signature,
   makeSignDoc,
   pubkeyToAddress,
   serializeSignDoc,
 } from '@cosmjs/amino'
-import {
-  Secp256k1,
-  Secp256k1Signature,
-  Slip10,
-  Slip10Curve,
-  sha256,
-  stringToPath,
-} from '@cosmjs/crypto'
+import { Secp256k1, Secp256k1Signature, sha256 } from '@cosmjs/crypto'
 import { fromBase64, toBase64 } from '@cosmjs/encoding'
-import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
+import { decodeTxRaw } from '@cosmjs/proto-signing'
 import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
-import * as bip39 from 'bip39'
+import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import { resolveChainConfig } from './chain-config-resolver.js'
 import {
   DEFAULT_GAS_PRICE_STEP,
@@ -26,16 +18,17 @@ import {
   calculateFeeAmountFromGasPrice,
   extractGasPrice,
 } from './gas-fee-utils.js'
-import SecureBuffer from './memory-safe/secure-buffer.js'
 import { withFallback } from './rpc-fallback.js'
+import SeedSignerCosmos from './signers/seed-signer-cosmos.js'
 
-/** @typedef {import('@tetherto/wdk-wallet').IWalletAccount} IWalletAccount */
+/** @typedef {import('@tetherto/wdk-wallet').IWalletAccount<TxRaw>} IWalletAccount */
 /** @typedef {import('@tetherto/wdk-wallet').KeyPair} KeyPair */
 /** @typedef {import('@tetherto/wdk-wallet').Transaction} Transaction */
 /** @typedef {import('@tetherto/wdk-wallet').TransactionResult} TransactionResult */
 /** @typedef {import('@tetherto/wdk-wallet').TransferOptions} TransferOptions */
 /** @typedef {import('@tetherto/wdk-wallet').TransferResult} TransferResult */
 /** @typedef {import('@tetherto/wdk-wallet').IWalletAccountReadOnly} IWalletAccountReadOnly */
+/** @typedef {import('./signers/seed-signer-cosmos.js').ISignerCosmos} ISignerCosmos */
 
 /**
  * @typedef {Object} CosmosTransaction
@@ -55,14 +48,13 @@ import { withFallback } from './rpc-fallback.js'
  * @property {number} [coinType] - The BIP-44 coin type (overrides registry, default: 118).
  * @property {string} [gasPrice] - The gas price with denom (e.g. '0.025uatom').
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
+ * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
  */
 
 /**
  * @typedef {import('./chain-config-resolver.js').ResolvedChainConfig} ResolvedChainConfig
  */
-
-const BIP_44_COSMOS_DERIVATION_PATH_PREFIX = "m/44'"
 
 // Default gas limit for simple token transfers
 // In production, this should be estimated per-transaction via simulation
@@ -127,16 +119,12 @@ function parseStdSignature(signature) {
 /** @implements {IWalletAccount} */
 export default class WalletAccountCosmos {
   /**
-   * Use WalletAccountCosmos.create() instead of constructor.
+   * Creates an account backed by a Cosmos signer.
    *
-   * @param {DirectSecp256k1Wallet} wallet - The initialized wallet.
-   * @param {SecureBuffer} privateKey - The private key in secure buffer.
-   * @param {Uint8Array} publicKey - The public key.
-   * @param {string} address - The account address.
-   * @param {string} path - The full derivation path.
+   * @param {ISignerCosmos} signer - The initialized Cosmos signer.
    * @param {ResolvedChainConfig} resolvedConfig - The resolved configuration object.
    */
-  constructor(wallet, privateKey, publicKey, address, path, resolvedConfig) {
+  constructor(signer, resolvedConfig) {
     /**
      * The resolved wallet configuration.
      *
@@ -144,14 +132,6 @@ export default class WalletAccountCosmos {
      * @type {ResolvedChainConfig}
      */
     this._config = resolvedConfig
-
-    /**
-     * The full derivation path.
-     *
-     * @protected
-     * @type {string}
-     */
-    this._path = path
 
     /**
      * The address prefix for Bech32 encoding.
@@ -162,36 +142,12 @@ export default class WalletAccountCosmos {
     this._prefix = resolvedConfig.addressPrefix
 
     /**
-     * The wallet instance.
+     * The signer used by this account.
      *
      * @protected
-     * @type {DirectSecp256k1Wallet}
+     * @type {ISignerCosmos}
      */
-    this._wallet = wallet
-
-    /**
-     * The derived private key in a memory-safe buffer.
-     *
-     * @protected
-     * @type {SecureBuffer}
-     */
-    this._privateKey = privateKey
-
-    /**
-     * The public key.
-     *
-     * @protected
-     * @type {Uint8Array}
-     */
-    this._publicKey = publicKey
-
-    /**
-     * The account address.
-     *
-     * @protected
-     * @type {string}
-     */
-    this._address = address
+    this._signer = signer
 
     /**
      * Whether this account has been disposed.
@@ -211,41 +167,25 @@ export default class WalletAccountCosmos {
    * @returns {Promise<WalletAccountCosmos>} The wallet account instance.
    */
   static async create(seed, path, config = {}) {
-    // Resolve chain configuration from registry or custom config
-    const resolvedConfig = resolveChainConfig(config)
-
-    if (typeof seed === 'string') {
-      if (!bip39.validateMnemonic(seed)) {
-        throw new Error('The seed phrase is invalid.')
-      }
-      seed = bip39.mnemonicToSeedSync(seed)
+    const rootSigner = new SeedSignerCosmos(seed, config)
+    try {
+      const signer = await rootSigner.derive(path)
+      return await WalletAccountCosmos.fromSigner(signer, config)
+    } finally {
+      rootSigner.dispose()
     }
+  }
 
-    // Build full derivation path with resolved coinType
-    const fullPath = `${BIP_44_COSMOS_DERIVATION_PATH_PREFIX}/${resolvedConfig.coinType}'/${path}`
-
-    const derivationPath = stringToPath(fullPath)
-    const { privkey } = Slip10.derivePath(
-      Slip10Curve.Secp256k1,
-      seed,
-      derivationPath
-    )
-
-    const privateKey = new SecureBuffer(privkey)
-    const wallet = await DirectSecp256k1Wallet.fromKey(
-      privkey,
-      resolvedConfig.addressPrefix
-    )
-    const [account] = await wallet.getAccounts()
-
-    return new WalletAccountCosmos(
-      wallet,
-      privateKey,
-      account.pubkey,
-      account.address,
-      fullPath,
-      resolvedConfig
-    )
+  /**
+   * Creates a wallet account from an initialized Cosmos signer.
+   *
+   * @param {ISignerCosmos} signer - The Cosmos signer.
+   * @param {CosmosWalletConfig} [config] - The configuration object.
+   * @returns {Promise<WalletAccountCosmos>} The wallet account instance.
+   */
+  static async fromSigner(signer, config = {}) {
+    await signer.getAddress()
+    return new WalletAccountCosmos(signer, resolveChainConfig(config))
   }
 
   /**
@@ -267,7 +207,7 @@ export default class WalletAccountCosmos {
    */
   async getAddress() {
     this._assertNotDisposed()
-    return this._address
+    return await this._signer.getAddress()
   }
 
   /**
@@ -468,17 +408,24 @@ export default class WalletAccountCosmos {
       gas: DEFAULT_GAS_LIMIT,
     }
 
-    const wallet = this._wallet
     const channelConfig = isSamePrefix
       ? null
       : this._getIbcChannelConfigForPrefix(recipientPrefix)
+    const totalFee = BigInt(fee.amount[0].amount)
+
+    if (
+      this._config.transferMaxFee !== undefined &&
+      totalFee > this._config.transferMaxFee
+    ) {
+      throw new Error('Exceeded maximum fee cost for transfer operation.')
+    }
 
     const result = await withFallback(
       this._config.rpcEndpoints,
       async endpoint => {
         const client = await SigningStargateClient.connectWithSigner(
           endpoint,
-          wallet
+          this._signer
         )
 
         if (isSamePrefix) {
@@ -529,15 +476,6 @@ export default class WalletAccountCosmos {
       }
     )
 
-    const totalFee = BigInt(fee.amount[0].amount)
-
-    if (
-      this._config.transferMaxFee !== undefined &&
-      totalFee >= this._config.transferMaxFee
-    ) {
-      throw new Error('Exceeded maximum fee cost for transfer operation.')
-    }
-
     return {
       hash: result.transactionHash,
       fee: totalFee,
@@ -572,7 +510,7 @@ export default class WalletAccountCosmos {
 
     if (
       this._config.transferMaxFee !== undefined &&
-      estimatedFee >= this._config.transferMaxFee
+      estimatedFee > this._config.transferMaxFee
     ) {
       throw new Error('Exceeded maximum fee cost for transfer operation.')
     }
@@ -589,11 +527,7 @@ export default class WalletAccountCosmos {
    */
   get keyPair() {
     this._assertNotDisposed()
-
-    return {
-      privateKey: this._privateKey.buffer,
-      publicKey: this._publicKey,
-    }
+    return this._signer.keyPair
   }
 
   /**
@@ -607,20 +541,7 @@ export default class WalletAccountCosmos {
    */
   async sign(message) {
     this._assertNotDisposed()
-
-    const signDoc = buildAdr36SignDoc(this._address, message)
-    const messageHash = sha256(serializeSignDoc(signDoc))
-    const signature = Secp256k1.createSignature(
-      messageHash,
-      this._privateKey.buffer
-    )
-    const fixedLengthSignature = new Uint8Array(64)
-    fixedLengthSignature.set(signature.r(32), 0)
-    fixedLengthSignature.set(signature.s(32), 32)
-
-    return JSON.stringify(
-      encodeSecp256k1Signature(this._publicKey, fixedLengthSignature)
-    )
+    return await this._signer.sign(message)
   }
 
   /**
@@ -635,10 +556,12 @@ export default class WalletAccountCosmos {
 
     try {
       const stdSignature = parseStdSignature(signature)
+      const address = await this.getAddress()
+      const publicKey = this.keyPair.publicKey
 
       if (
         pubkeyToAddress(stdSignature.pub_key, this._prefix).toLowerCase() !==
-        this._address.toLowerCase()
+        address.toLowerCase()
       ) {
         return false
       }
@@ -646,9 +569,8 @@ export default class WalletAccountCosmos {
       // Ensure signature base64 is well-formed before verifying.
       fromBase64(stdSignature.signature)
 
-      const { pubkey, signature: signatureBytes } =
-        decodeSignature(stdSignature)
-      const signDoc = buildAdr36SignDoc(this._address, message)
+      const { signature: signatureBytes } = decodeSignature(stdSignature)
+      const signDoc = buildAdr36SignDoc(address, message)
       const messageHash = sha256(serializeSignDoc(signDoc))
       const secp256k1Signature =
         Secp256k1Signature.fromFixedLength(signatureBytes)
@@ -656,7 +578,7 @@ export default class WalletAccountCosmos {
       return Secp256k1.verifySignature(
         secp256k1Signature,
         messageHash,
-        this._publicKey
+        publicKey
       )
     } catch (_error) {
       return false
@@ -667,10 +589,9 @@ export default class WalletAccountCosmos {
    * Signs a transaction without broadcasting it.
    *
    * @param {Transaction} transaction - The transaction to sign.
-   * @returns {Promise<unknown>} The signed Cosmos TxRaw transaction.
+   * @returns {Promise<TxRaw>} The signed Cosmos transaction.
    */
   async signTransaction(transaction) {
-    const cosmosTransaction = this._toCosmosTransaction(transaction)
     this._assertNotDisposed()
 
     if (!this._config.rpcEndpoints || this._config.rpcEndpoints.length === 0) {
@@ -679,30 +600,31 @@ export default class WalletAccountCosmos {
       )
     }
 
+    const cosmosTransaction = this._toCosmosTransaction(transaction)
     const { gasDenom, gasAmount } = this._parseGasPrice()
+    const transactionFee = BigInt(gasAmount)
+    this._assertTransactionFeeWithinLimit(transactionFee)
+
     const fee = {
       amount: [{ denom: gasDenom, amount: gasAmount }],
       gas: DEFAULT_GAS_LIMIT,
     }
-
+    const signerAddress = await this.getAddress()
     const message = {
       typeUrl: '/cosmos.bank.v1beta1.MsgSend',
       value: {
-        fromAddress: this._address,
+        fromAddress: signerAddress,
         toAddress: cosmosTransaction.to,
         amount: cosmosTransaction.amount,
       },
     }
-
-    const wallet = this._wallet
-    const signerAddress = this._address
 
     return await withFallback(
       this._config.rpcEndpoints,
       async endpoint => {
         const client = await SigningStargateClient.connectWithSigner(
           endpoint,
-          wallet
+          this._signer
         )
 
         return client.sign(
@@ -720,13 +642,12 @@ export default class WalletAccountCosmos {
   }
 
   /**
-   * Sends a transaction.
+   * Sends an unsigned or previously signed transaction.
    *
-   * @param {Transaction} transaction - The transaction to send (use CosmosTransaction format).
+   * @param {Transaction | TxRaw} transaction - The transaction to send.
    * @returns {Promise<TransactionResult>} The transaction's result.
    */
   async sendTransaction(transaction) {
-    const cosmosTransaction = this._toCosmosTransaction(transaction)
     this._assertNotDisposed()
 
     if (!this._config.rpcEndpoints || this._config.rpcEndpoints.length === 0) {
@@ -735,21 +656,49 @@ export default class WalletAccountCosmos {
       )
     }
 
+    if (this._isSignedTransaction(transaction)) {
+      const signedTransaction = /** @type {TxRaw} */ (transaction)
+      const transactionBytes = TxRaw.encode(signedTransaction).finish()
+      const transactionFee = this._getSignedTransactionFee(transactionBytes)
+      this._assertTransactionFeeWithinLimit(transactionFee)
+
+      const result = await withFallback(
+        this._config.rpcEndpoints,
+        async endpoint => {
+          const client = await StargateClient.connect(endpoint)
+          return await client.broadcastTx(transactionBytes)
+        },
+        {
+          retryCount: this._config.retryCount,
+          retryDelay: this._config.retryDelay,
+        }
+      )
+
+      return {
+        hash: result.transactionHash,
+        fee: transactionFee,
+      }
+    }
+
+    const cosmosTransaction = this._toCosmosTransaction(
+      /** @type {Transaction} */ (transaction)
+    )
     const { gasDenom, gasAmount } = this._parseGasPrice()
+    const transactionFee = BigInt(gasAmount)
+    this._assertTransactionFeeWithinLimit(transactionFee)
+
     const fee = {
       amount: [{ denom: gasDenom, amount: gasAmount }],
       gas: DEFAULT_GAS_LIMIT,
     }
-
-    const wallet = this._wallet
-    const senderAddress = this._address
+    const senderAddress = await this.getAddress()
 
     const result = await withFallback(
       this._config.rpcEndpoints,
       async endpoint => {
         const client = await SigningStargateClient.connectWithSigner(
           endpoint,
-          wallet
+          this._signer
         )
 
         return client.sendTokens(
@@ -768,7 +717,7 @@ export default class WalletAccountCosmos {
 
     return {
       hash: result.transactionHash,
-      fee: BigInt(fee.amount[0].amount),
+      fee: transactionFee,
     }
   }
 
@@ -804,12 +753,12 @@ export default class WalletAccountCosmos {
   }
 
   /**
-   * Quotes the cost of sending a transaction.
+   * Quotes the cost of sending an unsigned or signed transaction.
    *
-   * @param {Transaction} _transaction - The transaction to quote (use CosmosTransaction format).
+   * @param {Transaction | TxRaw} transaction - The transaction to quote.
    * @returns {Promise<{fee: bigint}>} The estimated fee.
    */
-  async quoteSendTransaction(_transaction) {
+  async quoteSendTransaction(transaction) {
     this._assertNotDisposed()
 
     if (!this._config.rpcEndpoints || this._config.rpcEndpoints.length === 0) {
@@ -818,18 +767,65 @@ export default class WalletAccountCosmos {
       )
     }
 
-    const { gasAmount } = this._parseGasPrice()
-    const estimatedFee = BigInt(gasAmount)
+    const estimatedFee = this._isSignedTransaction(transaction)
+      ? this._getSignedTransactionFee(
+          TxRaw.encode(/** @type {TxRaw} */ (transaction)).finish()
+        )
+      : BigInt(this._parseGasPrice().gasAmount)
 
-    if (
-      this._config.transferMaxFee !== undefined &&
-      estimatedFee >= this._config.transferMaxFee
-    ) {
-      throw new Error('Exceeded maximum fee cost for transfer operation.')
-    }
+    this._assertTransactionFeeWithinLimit(estimatedFee)
 
     return {
       fee: estimatedFee,
+    }
+  }
+
+  /**
+   * Checks whether a transaction is an encoded Cosmos TxRaw object.
+   *
+   * @param {Transaction | TxRaw} transaction - The transaction to inspect.
+   * @returns {boolean} Whether the transaction is signed.
+   * @private
+   */
+  _isSignedTransaction(transaction) {
+    if (transaction === null || typeof transaction !== 'object') return false
+    const candidate = /** @type {Partial<TxRaw>} */ (
+      /** @type {unknown} */ (transaction)
+    )
+    return (
+      candidate.bodyBytes instanceof Uint8Array &&
+      candidate.authInfoBytes instanceof Uint8Array &&
+      Array.isArray(candidate.signatures)
+    )
+  }
+
+  /**
+   * Reads the total fee from an encoded signed transaction.
+   *
+   * @param {Uint8Array} transactionBytes - Encoded TxRaw bytes.
+   * @returns {bigint} The total transaction fee.
+   * @private
+   */
+  _getSignedTransactionFee(transactionBytes) {
+    const decodedTransaction = decodeTxRaw(transactionBytes)
+    return (decodedTransaction.authInfo.fee?.amount || []).reduce(
+      (total, coin) => total + BigInt(coin.amount),
+      BigInt(0)
+    )
+  }
+
+  /**
+   * Enforces the configured transaction fee limit.
+   *
+   * @param {bigint} fee - Transaction fee in base units.
+   * @private
+   */
+  _assertTransactionFeeWithinLimit(fee) {
+    if (
+      this._config.transactionMaxFee !== undefined &&
+      fee > this._config.transactionMaxFee
+    ) {
+      throw new Error('Exceeded maximum fee cost for transaction operation.')
     }
   }
 
@@ -873,8 +869,11 @@ export default class WalletAccountCosmos {
    * @type {number}
    */
   get index() {
-    const pathParts = this._path.split('/')
-    return parseInt(pathParts[pathParts.length - 1], 10)
+    const index = this._signer.index
+    if (index === undefined) {
+      throw new Error('The Cosmos signer does not have a derivation index.')
+    }
+    return index
   }
 
   /**
@@ -883,7 +882,11 @@ export default class WalletAccountCosmos {
    * @type {string}
    */
   get path() {
-    return this._path
+    const path = this._signer.path
+    if (path === undefined) {
+      throw new Error('The Cosmos signer does not have a derivation path.')
+    }
+    return path
   }
 
   /**
@@ -904,10 +907,7 @@ export default class WalletAccountCosmos {
       return
     }
 
-    if (this._privateKey) {
-      this._privateKey.dispose()
-    }
-
+    this._signer.dispose()
     this._disposed = true
   }
 }
