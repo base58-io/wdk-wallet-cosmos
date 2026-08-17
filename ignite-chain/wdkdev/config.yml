@@ -16,9 +16,6 @@ accounts:
     coins:
       - 10000000stake
     mnemonic: "thumb subway until asthma diesel visa supply brush relief control amused bonus grace great flavor initial drum loud circle crowd topple box novel biology"
-client:
-  openapi:
-    path: docs/static/openapi.json
 faucet:
   name: bob
   coins:

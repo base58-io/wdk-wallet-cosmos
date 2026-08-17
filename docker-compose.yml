@@ -1,3 +1,9 @@
+# Ignite's openapi generation opens more files than OrbStack's default soft
+# limit (20480) allows, so both chains need the raised nofile ulimit to boot.
+# The /go volumes persist the Go module cache and compiled chain binary across
+# restarts; without them every boot re-downloads ~2 GB of modules and
+# recompiles the chain from source (~6 minutes at full CPU). Separate volumes
+# per chain avoid cross-container lock contention.
 services:
   wdk-chain:
     image: ignitehq/cli:v29.4.0
@@ -7,7 +13,18 @@ services:
     volumes:
       - ./ignite-chain/wdkdev:/apps/wdkdev
       - ./ignite-home:/home/tendermint
+      - go-cache-1:/go
     command: ["chain", "serve", "-p", "wdkdev", "--reset-once"]
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:26657/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 600s
     ports:
       - "26657:26657" # RPC
       - "1317:1317" # REST
@@ -22,7 +39,18 @@ services:
     volumes:
       - ./ignite-chain/wdkdev2:/apps/wdkdev2
       - ./ignite-home2:/home/tendermint
+      - go-cache-2:/go
     command: ["chain", "serve", "-p", "wdkdev2", "--reset-once"]
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:26657/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 600s
     ports:
       - "26658:26657" # RPC
       - "1318:1317" # REST
@@ -35,7 +63,13 @@ services:
     volumes:
       - ./hermes:/home/hermes/.hermes
     depends_on:
-      - wdk-chain
-      - wdk-chain2
+      wdk-chain:
+        condition: service_healthy
+      wdk-chain2:
+        condition: service_healthy
     restart: unless-stopped
     command: ["start"]
+
+volumes:
+  go-cache-1:
+  go-cache-2:
