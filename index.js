@@ -9,6 +9,12 @@
 /** @typedef {import('./src/wallet-account-cosmos.js').CosmosWalletConfig} CosmosWalletConfig */
 /** @typedef {import('./src/chain-config-resolver.js').ResolvedChainConfig} ResolvedChainConfig */
 
+/** @typedef {import('./src/wallet-account-cosmos.js').DirectSignDocJson} DirectSignDocJson */
+/** @typedef {import('./src/wallet-account-cosmos.js').SignDirectParams} SignDirectParams */
+/** @typedef {import('./src/wallet-account-cosmos.js').SignDirectResult} SignDirectResult */
+/** @typedef {import('./src/wallet-account-cosmos.js').SignAminoParams} SignAminoParams */
+/** @typedef {import('./src/wallet-account-cosmos.js').SignAminoResult} SignAminoResult */
+
 export { default } from "./src/wallet-manager-cosmos.js";
 
 export { default as WalletAccountCosmos } from "./src/wallet-account-cosmos.js";

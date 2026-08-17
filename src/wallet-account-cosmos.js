@@ -8,7 +8,10 @@ import {
 } from '@cosmjs/amino'
 import { Secp256k1, Secp256k1Signature, sha256 } from '@cosmjs/crypto'
 import { fromBase64, toBase64 } from '@cosmjs/encoding'
-import { decodeTxRaw } from '@cosmjs/proto-signing'
+import {
+  decodeTxRaw,
+  makeSignDoc as makeDirectSignDoc,
+} from '@cosmjs/proto-signing'
 import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
 import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import { resolveChainConfig } from './chain-config-resolver.js'
@@ -65,6 +68,198 @@ const TEXT_ENCODER = new TextEncoder()
 /**
  * @typedef {import('@cosmjs/amino').StdSignDoc} StdSignDoc
  */
+
+/**
+ * @typedef {import('@cosmjs/amino').StdSignature} StdSignature
+ */
+
+/**
+ * A protobuf `SignDoc` in JSON wire form.
+ *
+ * Byte fields are base64 strings and the account number is a decimal string, so
+ * the document survives the JSON-RPC bridge between the wallet worklet and its
+ * host application (that bridge rejects typed arrays and bigints).
+ *
+ * @typedef {Object} DirectSignDocJson
+ * @property {string} chainId - The chain id the document is bound to.
+ * @property {string} accountNumber - The signer's account number, as a decimal string.
+ * @property {string} bodyBytes - The base64-encoded protobuf `TxBody`.
+ * @property {string} authInfoBytes - The base64-encoded protobuf `AuthInfo`.
+ */
+
+/**
+ * @typedef {Object} SignDirectParams
+ * @property {string} signerAddress - The address expected to sign, must match this account.
+ * @property {DirectSignDocJson} signDoc - The document to sign.
+ */
+
+/**
+ * @typedef {Object} SignDirectResult
+ * @property {StdSignature} signature - The Cosmos signature over the document.
+ * @property {DirectSignDocJson} signed - The document that was actually signed.
+ */
+
+/**
+ * @typedef {Object} SignAminoParams
+ * @property {string} signerAddress - The address expected to sign, must match this account.
+ * @property {StdSignDoc} signDoc - The document to sign, already JSON-safe.
+ */
+
+/**
+ * @typedef {Object} SignAminoResult
+ * @property {StdSignature} signature - The Cosmos signature over the document.
+ * @property {StdSignDoc} signed - The document that was actually signed.
+ */
+
+const DECIMAL_STRING_PATTERN = /^(?:0|[1-9][0-9]*)$/
+
+/**
+ * Checks whether a value is a non-negative decimal integer string.
+ *
+ * @param {unknown} value - The value to check.
+ * @returns {boolean} Whether the value is a decimal string.
+ */
+function isDecimalString(value) {
+  return typeof value === 'string' && DECIMAL_STRING_PATTERN.test(value)
+}
+
+/**
+ * Checks whether a value is a `{ denom, amount }` coin with a decimal amount.
+ *
+ * @param {unknown} value - The value to check.
+ * @returns {boolean} Whether the value is a coin.
+ */
+function isCoin(value) {
+  if (!value || typeof value !== 'object') return false
+  const coin = /** @type {{ denom?: unknown, amount?: unknown }} */ (value)
+  return typeof coin.denom === 'string' && isDecimalString(coin.amount)
+}
+
+/**
+ * Checks whether a value is an amino `{ type, value }` message.
+ *
+ * @param {unknown} value - The value to check.
+ * @returns {boolean} Whether the value is an amino message.
+ */
+function isAminoMsg(value) {
+  if (!value || typeof value !== 'object') return false
+  const msg = /** @type {{ type?: unknown, value?: unknown }} */ (value)
+  return (
+    typeof msg.type === 'string' && Boolean(msg.value) && typeof msg.value === 'object'
+  )
+}
+
+/**
+ * Reads a required string field out of unvalidated JSON-RPC params.
+ *
+ * @param {unknown} value - The raw field value.
+ * @param {string} context - The error message prefix.
+ * @param {string} field - The field's path, used in error messages.
+ * @returns {string} The field value.
+ */
+function parseStringField(value, context, field) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${context}: ${field} must be a non-empty string.`)
+  }
+  return value
+}
+
+/**
+ * Decodes a base64 byte field out of unvalidated JSON-RPC params.
+ *
+ * Byte fields are base64 only: hex or numeric-keyed objects (what a mangled
+ * `Uint8Array` looks like after crossing the bridge) are rejected instead of
+ * guessed at.
+ *
+ * @param {unknown} value - The raw field value.
+ * @param {string} context - The error message prefix.
+ * @param {string} field - The field's path, used in error messages.
+ * @returns {Uint8Array} The decoded bytes.
+ */
+function parseBase64Field(value, context, field) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${context}: ${field} must be a non-empty base64 string.`)
+  }
+
+  try {
+    return fromBase64(value)
+  } catch (_error) {
+    throw new Error(`${context}: ${field} is not valid base64.`)
+  }
+}
+
+/**
+ * Parses a decimal account number string into the number CosmJS expects.
+ *
+ * @param {unknown} value - The raw field value.
+ * @param {string} context - The error message prefix.
+ * @param {string} field - The field's path, used in error messages.
+ * @returns {number} The account number.
+ */
+function parseAccountNumber(value, context, field) {
+  if (!isDecimalString(value)) {
+    throw new Error(`${context}: ${field} must be a decimal string.`)
+  }
+
+  const accountNumber = Number(value)
+  if (!Number.isSafeInteger(accountNumber)) {
+    throw new Error(`${context}: ${field} is out of range.`)
+  }
+
+  return accountNumber
+}
+
+/**
+ * Validates a `StdSignDoc` received over the JSON-RPC bridge.
+ *
+ * Amino documents are already JSON-safe, so the document is validated in place
+ * and passed through untouched: the signature must cover exactly the document
+ * the caller asked to sign.
+ *
+ * @param {unknown} value - The raw sign document.
+ * @param {string} context - The error message prefix.
+ * @returns {StdSignDoc} The validated sign document.
+ */
+function parseStdSignDoc(value, context) {
+  if (!value || typeof value !== 'object') {
+    throw new Error(`${context}: signDoc must be an object.`)
+  }
+
+  const signDoc = /** @type {Record<string, unknown>} */ (value)
+
+  if (typeof signDoc.chain_id !== 'string') {
+    throw new Error(`${context}: signDoc.chain_id must be a string.`)
+  }
+  if (!isDecimalString(signDoc.account_number)) {
+    throw new Error(`${context}: signDoc.account_number must be a decimal string.`)
+  }
+  if (!isDecimalString(signDoc.sequence)) {
+    throw new Error(`${context}: signDoc.sequence must be a decimal string.`)
+  }
+  if (typeof signDoc.memo !== 'string') {
+    throw new Error(`${context}: signDoc.memo must be a string.`)
+  }
+  if (!Array.isArray(signDoc.msgs) || !signDoc.msgs.every(isAminoMsg)) {
+    throw new Error(
+      `${context}: signDoc.msgs must be an array of { type, value } messages.`
+    )
+  }
+  if (!signDoc.fee || typeof signDoc.fee !== 'object') {
+    throw new Error(`${context}: signDoc.fee must be an object.`)
+  }
+
+  const fee = /** @type {{ amount?: unknown, gas?: unknown }} */ (signDoc.fee)
+  if (!Array.isArray(fee.amount) || !fee.amount.every(isCoin)) {
+    throw new Error(
+      `${context}: signDoc.fee.amount must be an array of { denom, amount } coins.`
+    )
+  }
+  if (!isDecimalString(fee.gas)) {
+    throw new Error(`${context}: signDoc.fee.gas must be a decimal string.`)
+  }
+
+  return /** @type {StdSignDoc} */ (value)
+}
 
 /**
  * Builds the ADR-36 sign doc for arbitrary message signing.
@@ -583,6 +778,132 @@ export default class WalletAccountCosmos {
     } catch (_error) {
       return false
     }
+  }
+
+  /**
+   * Returns the account's compressed secp256k1 public key.
+   *
+   * Base64 encoded, since the JSON-RPC bridge to the host application cannot
+   * carry raw bytes.
+   *
+   * @returns {Promise<string>} The base64-encoded 33-byte public key.
+   */
+  async getPublicKey() {
+    this._assertNotDisposed()
+    await this._signer.getAddress()
+    return toBase64(this.keyPair.publicKey)
+  }
+
+  /**
+   * Ensures a requested signer address belongs to this account.
+   *
+   * @param {unknown} signerAddress - The requested signer address.
+   * @param {string} context - The error message prefix.
+   * @returns {Promise<string>} The validated signer address.
+   * @private
+   */
+  async _assertSignerAddress(signerAddress, context) {
+    const requested = parseStringField(signerAddress, context, 'signerAddress')
+    const address = await this.getAddress()
+
+    if (requested !== address) {
+      throw new Error(
+        `${context}: signerAddress ${requested} does not belong to this account.`
+      )
+    }
+
+    return address
+  }
+
+  /**
+   * Signs a protobuf `SignDoc` (SIGN_MODE_DIRECT), mirroring the cosmjs
+   * `OfflineDirectSigner` contract with JSON-safe fields.
+   *
+   * Strictly string-in/string-out JSON: byte fields are base64 and the account
+   * number is a decimal string, on the way in and on the way out.
+   *
+   * @param {SignDirectParams} params - The signer address and document to sign.
+   * @returns {Promise<SignDirectResult>} The signature and the signed document.
+   * @throws {Error} If the params are malformed or the signer address does not match.
+   */
+  async signDirect(params) {
+    this._assertNotDisposed()
+
+    const context = 'Invalid signDirect params'
+
+    if (!params || typeof params !== 'object') {
+      throw new Error(
+        `${context}: an object with signerAddress and signDoc is required.`
+      )
+    }
+
+    const signerAddress = await this._assertSignerAddress(
+      params.signerAddress,
+      context
+    )
+
+    if (!params.signDoc || typeof params.signDoc !== 'object') {
+      throw new Error(`${context}: signDoc must be an object.`)
+    }
+
+    const { chainId, accountNumber, bodyBytes, authInfoBytes } = params.signDoc
+    const signDoc = makeDirectSignDoc(
+      parseBase64Field(bodyBytes, context, 'signDoc.bodyBytes'),
+      parseBase64Field(authInfoBytes, context, 'signDoc.authInfoBytes'),
+      parseStringField(chainId, context, 'signDoc.chainId'),
+      parseAccountNumber(accountNumber, context, 'signDoc.accountNumber')
+    )
+
+    const { signature, signed } = await this._signer.signDirect(
+      signerAddress,
+      signDoc
+    )
+
+    return {
+      signature,
+      signed: {
+        chainId: signed.chainId,
+        accountNumber: signed.accountNumber.toString(),
+        bodyBytes: toBase64(signed.bodyBytes),
+        authInfoBytes: toBase64(signed.authInfoBytes),
+      },
+    }
+  }
+
+  /**
+   * Signs an amino `StdSignDoc` (SIGN_MODE_LEGACY_AMINO_JSON), mirroring the
+   * cosmjs `OfflineAminoSigner` contract.
+   *
+   * The document is already JSON-safe, so it is validated and signed as-is, then
+   * echoed back alongside the signature.
+   *
+   * @param {SignAminoParams} params - The signer address and document to sign.
+   * @returns {Promise<SignAminoResult>} The signature and the signed document.
+   * @throws {Error} If the params are malformed or the signer address does not match.
+   */
+  async signAmino(params) {
+    this._assertNotDisposed()
+
+    const context = 'Invalid signAmino params'
+
+    if (!params || typeof params !== 'object') {
+      throw new Error(
+        `${context}: an object with signerAddress and signDoc is required.`
+      )
+    }
+
+    const signerAddress = await this._assertSignerAddress(
+      params.signerAddress,
+      context
+    )
+    const signDoc = parseStdSignDoc(params.signDoc, context)
+
+    const { signature, signed } = await this._signer.signAmino(
+      signerAddress,
+      signDoc
+    )
+
+    return { signature, signed }
   }
 
   /**

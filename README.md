@@ -201,7 +201,7 @@ wallet.dispose()
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | [WalletManagerCosmos](#walletmanagercosmos) | Main class for managing Cosmos wallets. Extends `WalletManager` from `@tetherto/wdk-wallet`.              | [Constructor](#constructor), [Methods](#methods)     |
 | [WalletAccountCosmos](#walletaccountcosmos) | Individual Cosmos wallet account implementation. Implements `IWalletAccount<TxRaw>`.                        | [Creation](#creation), [Methods](#methods-1)          |
-| `SeedSignerCosmos`                          | Memory-safe, derivable Cosmos signer backed by a BIP-39 seed.                                               | `derive`, `getAddress`, `sign`, `dispose`             |
+| `SeedSignerCosmos`                          | Memory-safe, derivable Cosmos signer backed by a BIP-39 seed.                                               | `derive`, `getAddress`, `sign`, `signDirect`, `signAmino`, `dispose` |
 
 ### WalletManagerCosmos
 
@@ -322,6 +322,9 @@ const signerAccount = await WalletAccountCosmos.fromSigner(signer, config)
 | `quoteTransfer(options)`   | Estimates the fee for a transfer                                                           | `Promise<{fee: bigint}>`               |
 | `sign(message)`            | Signs a UTF-8 message using Cosmos ADR-36 arbitrary message signing                         | `Promise<string>`                      |
 | `verify(message, sig)`     | Verifies a JSON-encoded Cosmos ADR-36 `StdSignature` against this account                   | `Promise<boolean>`                     |
+| `getPublicKey()`           | Returns the base64-encoded compressed secp256k1 public key                                  | `Promise<string>`                      |
+| `signDirect(params)`       | Signs a protobuf `SignDoc` (SIGN_MODE_DIRECT) from JSON-safe fields                         | `Promise<SignDirectResult>`             |
+| `signAmino(params)`        | Signs an amino `StdSignDoc` (SIGN_MODE_LEGACY_AMINO_JSON)                                   | `Promise<SignAminoResult>`              |
 | `signTransaction(tx)`      | Signs a transaction and returns a Cosmos `TxRaw`                                            | `Promise<TxRaw>`                       |
 | `sendTransaction(tx)`      | Sends an unsigned transaction or broadcasts a signed `TxRaw`                               | `Promise<{hash: string, fee: bigint}>` |
 | `quoteSendTransaction(tx)` | Estimates an unsigned fee or reads the fee from a signed `TxRaw`                            | `Promise<{fee: bigint}>`               |
@@ -351,6 +354,48 @@ Transfers tokens to another address.
 - Operations throw before signing or broadcasting when their fee exceeds the configured limit.
 
 > **Note**: Message signing (`sign`) uses Cosmos ADR-36, compatible with wallet arbitrary-message signing flows such as Keplr `signArbitrary`. It returns a JSON-encoded `StdSignature`; `verify` expects the same format.
+
+##### Direct and amino signing
+
+`signDirect` and `signAmino` mirror the cosmjs `OfflineDirectSigner` and
+`OfflineAminoSigner` contracts, but take and return plain JSON only: bytes are
+base64 strings and account numbers are decimal strings, so requests survive the
+JSON-RPC bridge between the wallet worklet and its host application.
+
+Both methods throw if `signerAddress` does not belong to the account, and reject
+malformed params instead of coercing them. Byte fields are base64 only.
+
+```javascript
+// SIGN_MODE_DIRECT
+const { signature, signed } = await account.signDirect({
+  signerAddress: await account.getAddress(),
+  signDoc: {
+    chainId: 'cosmoshub-4',
+    accountNumber: '12345', // decimal string
+    bodyBytes: 'CpEBChwvY29zbW9z...', // base64
+    authInfoBytes: 'ClAKRgofL2Nvc21...', // base64
+  },
+})
+
+// `signed` mirrors the request shape, so it can be returned to the caller as-is.
+// `signature` is a Cosmos StdSignature: { pub_key, signature }.
+
+// SIGN_MODE_LEGACY_AMINO_JSON
+const aminoResult = await account.signAmino({
+  signerAddress: await account.getAddress(),
+  signDoc: {
+    chain_id: 'cosmoshub-4',
+    account_number: '12345',
+    sequence: '3',
+    fee: { amount: [{ denom: 'uatom', amount: '500' }], gas: '200000' },
+    msgs: [{ type: 'cosmos-sdk/MsgSend', value: { /* ... */ } }],
+    memo: '',
+  },
+})
+
+// The public key needed to verify the signatures, base64 encoded.
+const publicKey = await account.getPublicKey()
+```
 
 ## Supported Networks
 

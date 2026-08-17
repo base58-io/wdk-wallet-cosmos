@@ -151,6 +151,48 @@ export default class WalletAccountCosmos implements IWalletAccount {
      */
     verify(message: string, signature: string): Promise<boolean>;
     /**
+     * Returns the account's compressed secp256k1 public key.
+     *
+     * Base64 encoded, since the JSON-RPC bridge to the host application cannot
+     * carry raw bytes.
+     *
+     * @returns {Promise<string>} The base64-encoded 33-byte public key.
+     */
+    getPublicKey(): Promise<string>;
+    /**
+     * Ensures a requested signer address belongs to this account.
+     *
+     * @param {unknown} signerAddress - The requested signer address.
+     * @param {string} context - The error message prefix.
+     * @returns {Promise<string>} The validated signer address.
+     * @private
+     */
+    private _assertSignerAddress;
+    /**
+     * Signs a protobuf `SignDoc` (SIGN_MODE_DIRECT), mirroring the cosmjs
+     * `OfflineDirectSigner` contract with JSON-safe fields.
+     *
+     * Strictly string-in/string-out JSON: byte fields are base64 and the account
+     * number is a decimal string, on the way in and on the way out.
+     *
+     * @param {SignDirectParams} params - The signer address and document to sign.
+     * @returns {Promise<SignDirectResult>} The signature and the signed document.
+     * @throws {Error} If the params are malformed or the signer address does not match.
+     */
+    signDirect(params: SignDirectParams): Promise<SignDirectResult>;
+    /**
+     * Signs an amino `StdSignDoc` (SIGN_MODE_LEGACY_AMINO_JSON), mirroring the
+     * cosmjs `OfflineAminoSigner` contract.
+     *
+     * The document is already JSON-safe, so it is validated and signed as-is, then
+     * echoed back alongside the signature.
+     *
+     * @param {SignAminoParams} params - The signer address and document to sign.
+     * @returns {Promise<SignAminoResult>} The signature and the signed document.
+     * @throws {Error} If the params are malformed or the signer address does not match.
+     */
+    signAmino(params: SignAminoParams): Promise<SignAminoResult>;
+    /**
      * Signs a transaction without broadcasting it.
      *
      * @param {Transaction} transaction - The transaction to sign.
@@ -241,7 +283,6 @@ export default class WalletAccountCosmos implements IWalletAccount {
      */
     dispose(): void;
 }
-export type StdSignDoc = import("@cosmjs/amino").StdSignDoc;
 export type IWalletAccount = import("@tetherto/wdk-wallet").IWalletAccount<TxRaw>;
 export type KeyPair = import("@tetherto/wdk-wallet").KeyPair;
 export type Transaction = import("@tetherto/wdk-wallet").Transaction;
@@ -316,4 +357,71 @@ export type CosmosWalletConfig = {
     }> | undefined;
 };
 export type ResolvedChainConfig = import("./chain-config-resolver.js").ResolvedChainConfig;
+export type StdSignDoc = import("@cosmjs/amino").StdSignDoc;
+export type StdSignature = import("@cosmjs/amino").StdSignature;
+/**
+ * A protobuf `SignDoc` in JSON wire form.
+ *
+ * Byte fields are base64 strings and the account number is a decimal string, so
+ * the document survives the JSON-RPC bridge between the wallet worklet and its
+ * host application (that bridge rejects typed arrays and bigints).
+ */
+export type DirectSignDocJson = {
+    /**
+     * - The chain id the document is bound to.
+     */
+    chainId: string;
+    /**
+     * - The signer's account number, as a decimal string.
+     */
+    accountNumber: string;
+    /**
+     * - The base64-encoded protobuf `TxBody`.
+     */
+    bodyBytes: string;
+    /**
+     * - The base64-encoded protobuf `AuthInfo`.
+     */
+    authInfoBytes: string;
+};
+export type SignDirectParams = {
+    /**
+     * - The address expected to sign, must match this account.
+     */
+    signerAddress: string;
+    /**
+     * - The document to sign.
+     */
+    signDoc: DirectSignDocJson;
+};
+export type SignDirectResult = {
+    /**
+     * - The Cosmos signature over the document.
+     */
+    signature: StdSignature;
+    /**
+     * - The document that was actually signed.
+     */
+    signed: DirectSignDocJson;
+};
+export type SignAminoParams = {
+    /**
+     * - The address expected to sign, must match this account.
+     */
+    signerAddress: string;
+    /**
+     * - The document to sign, already JSON-safe.
+     */
+    signDoc: StdSignDoc;
+};
+export type SignAminoResult = {
+    /**
+     * - The Cosmos signature over the document.
+     */
+    signature: StdSignature;
+    /**
+     * - The document that was actually signed.
+     */
+    signed: StdSignDoc;
+};
 import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx';

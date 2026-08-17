@@ -13,6 +13,9 @@ import * as bip39 from 'bip39'
 import { resolveChainConfig } from '../chain-config-resolver.js'
 import SecureBuffer from '../memory-safe/secure-buffer.js'
 
+/** @typedef {import('@cosmjs/amino').AminoSignResponse} AminoSignResponse */
+/** @typedef {import('@cosmjs/amino').StdSignature} StdSignature */
+/** @typedef {import('@cosmjs/amino').StdSignDoc} StdSignDoc */
 /** @typedef {import('@cosmjs/proto-signing').AccountData} AccountData */
 /** @typedef {import('@cosmjs/proto-signing').DirectSignResponse} DirectSignResponse */
 /** @typedef {import('@tetherto/wdk-wallet').KeyPair} KeyPair */
@@ -113,6 +116,15 @@ export class ISignerCosmos extends ISigner {
    */
   async signDirect(signerAddress, signDoc) {
     throw new NotImplementedError('signDirect(signerAddress, signDoc)')
+  }
+
+  /**
+   * @param {string} signerAddress - Signer address.
+   * @param {StdSignDoc} signDoc - Amino (SIGN_MODE_LEGACY_AMINO_JSON) sign document.
+   * @returns {Promise<AminoSignResponse>}
+   */
+  async signAmino(signerAddress, signDoc) {
+    throw new NotImplementedError('signAmino(signerAddress, signDoc)')
   }
 
   dispose() {
@@ -229,25 +241,13 @@ export default class SeedSignerCosmos extends ISignerCosmos {
    */
   async sign(message) {
     await this._initialize()
-    const signDoc = buildAdr36SignDoc(
-      /** @type {string} */ (this._address),
-      message
+    const address = /** @type {string} */ (this._address)
+    const { signature } = await this.signAmino(
+      address,
+      buildAdr36SignDoc(address, message)
     )
-    const messageHash = sha256(serializeSignDoc(signDoc))
-    const signature = Secp256k1.createSignature(
-      messageHash,
-      /** @type {SecureBuffer} */ (this._privateKey).buffer
-    )
-    const fixedLengthSignature = new Uint8Array(64)
-    fixedLengthSignature.set(signature.r(32), 0)
-    fixedLengthSignature.set(signature.s(32), 32)
 
-    return JSON.stringify(
-      encodeSecp256k1Signature(
-        /** @type {Uint8Array} */ (this._publicKey),
-        fixedLengthSignature
-      )
-    )
+    return JSON.stringify(signature)
   }
 
   /** @returns {Promise<readonly AccountData[]>} */
@@ -270,6 +270,30 @@ export default class SeedSignerCosmos extends ISignerCosmos {
     ).signDirect(signerAddress, signDoc)
   }
 
+  /**
+   * Signs an amino (SIGN_MODE_LEGACY_AMINO_JSON) document.
+   *
+   * The document is signed as provided and echoed back in the response, which
+   * is what callers must use to assemble the broadcastable transaction.
+   *
+   * @param {string} signerAddress - Signer address, must match this signer's address.
+   * @param {StdSignDoc} signDoc - Amino sign document.
+   * @returns {Promise<AminoSignResponse>}
+   * @throws {SignerError} If the signer address does not belong to this signer.
+   */
+  async signAmino(signerAddress, signDoc) {
+    await this._initialize()
+
+    if (signerAddress !== this._address) {
+      throw new SignerError(`Address ${signerAddress} not found in wallet`)
+    }
+
+    return {
+      signed: signDoc,
+      signature: this._createSignature(sha256(serializeSignDoc(signDoc))),
+    }
+  }
+
   dispose() {
     if (this._disposed) return
 
@@ -278,6 +302,29 @@ export default class SeedSignerCosmos extends ISignerCosmos {
     this._wallet = undefined
     this._address = undefined
     this._disposed = true
+  }
+
+  /**
+   * Signs a 32-byte hash with this signer's key, in the fixed-length (r || s)
+   * encoding Cosmos expects.
+   *
+   * @private
+   * @param {Uint8Array} messageHash - The hash to sign.
+   * @returns {StdSignature} The encoded secp256k1 signature.
+   */
+  _createSignature(messageHash) {
+    const signature = Secp256k1.createSignature(
+      messageHash,
+      /** @type {SecureBuffer} */ (this._privateKey).buffer
+    )
+    const fixedLengthSignature = new Uint8Array(64)
+    fixedLengthSignature.set(signature.r(32), 0)
+    fixedLengthSignature.set(signature.s(32), 32)
+
+    return encodeSecp256k1Signature(
+      /** @type {Uint8Array} */ (this._publicKey),
+      fixedLengthSignature
+    )
   }
 
   /** @private */

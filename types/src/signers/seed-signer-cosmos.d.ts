@@ -34,6 +34,12 @@ export class ISignerCosmos extends ISigner {
      * @returns {Promise<DirectSignResponse>}
      */
     signDirect(signerAddress: string, signDoc: SignDoc): Promise<DirectSignResponse>;
+    /**
+     * @param {string} signerAddress - Signer address.
+     * @param {StdSignDoc} signDoc - Amino (SIGN_MODE_LEGACY_AMINO_JSON) sign document.
+     * @returns {Promise<AminoSignResponse>}
+     */
+    signAmino(signerAddress: string, signDoc: StdSignDoc): Promise<AminoSignResponse>;
 }
 /**
  * Memory-safe, derivable Cosmos signer backed by a BIP-39 seed.
@@ -81,6 +87,15 @@ export default class SeedSignerCosmos extends ISignerCosmos {
      * @throws {SignerError} If this signer cannot derive.
      */
     derive(relPath: string): Promise<SeedSignerCosmos>;
+    /**
+     * Signs a 32-byte hash with this signer's key, in the fixed-length (r || s)
+     * encoding Cosmos expects.
+     *
+     * @private
+     * @param {Uint8Array} messageHash - The hash to sign.
+     * @returns {StdSignature} The encoded secp256k1 signature.
+     */
+    private _createSignature;
     /** @private */
     private _assertNotDisposed;
     /** @private */
@@ -94,6 +109,9 @@ export default class SeedSignerCosmos extends ISignerCosmos {
      */
     private _initializeFromSeed;
 }
+export type AminoSignResponse = import("@cosmjs/amino").AminoSignResponse;
+export type StdSignature = import("@cosmjs/amino").StdSignature;
+export type StdSignDoc = import("@cosmjs/amino").StdSignDoc;
 export type AccountData = import("@cosmjs/proto-signing").AccountData;
 export type DirectSignResponse = import("@cosmjs/proto-signing").DirectSignResponse;
 export type KeyPair = import("@tetherto/wdk-wallet").KeyPair;
