@@ -304,7 +304,9 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   /**
    * Transfers tokens to another address.
    *
-   * @param {TransferOptions} options - The transfer's options.
+   * @param {TransferOptions & { memo?: string }} options - The transfer's
+   *   options. When `memo` is set it replaces the default transaction memo;
+   *   on the IBC path it is also set on the `MsgTransfer` payload.
    * @returns {Promise<TransferResult>} The transfer's result.
    */
   async transfer(options) {
@@ -312,7 +314,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
 
     const endpoints = this._assertRpcEndpoints('transfer tokens')
 
-    const { token, recipient, amount } = options
+    const { token, recipient, amount, memo } = options
     const address = await this.getAddress()
 
     const recipientPrefix = this._getBech32Prefix(recipient)
@@ -344,7 +346,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
           recipient,
           [sendAmount],
           fee,
-          'Transfer via WDK'
+          memo ?? 'Transfer via WDK'
         )
       }
 
@@ -365,7 +367,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
           receiver: recipient,
           timeoutHeight: undefined,
           timeoutTimestamp: timeoutTimestampNanoseconds,
-          memo: 'Transfer via WDK (IBC)',
+          memo: memo ?? 'Transfer via WDK (IBC)',
         },
       }
 
@@ -373,7 +375,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
         address,
         [msgTransfer],
         fee,
-        'Transfer via WDK (IBC)'
+        memo ?? 'Transfer via WDK (IBC)'
       )
 
       return {

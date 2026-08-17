@@ -155,6 +155,17 @@ const transferQuote = await account.quoteTransfer({
 console.log('Transfer fee estimate:', transferQuote.fee)
 ```
 
+Transfers carry a default memo. Pass `memo` to set your own:
+
+```javascript
+await account.transfer({
+  token: 'uatom',
+  recipient: 'cosmos1...',
+  amount: 1000000n,
+  memo: 'order-12345',
+})
+```
+
 ### Fee Management
 
 Retrieve current fee rates using `WalletManagerCosmos`.
@@ -348,6 +359,7 @@ Transfers tokens to another address.
   - `token` (string): Token denomination (e.g. "uatom")
   - `recipient` (string): Recipient address
   - `amount` (bigint): Amount in base units
+  - `memo` (string, optional): Transaction memo. Defaults to `"Transfer via WDK"`, or `"Transfer via WDK (IBC)"` on the IBC path. On an IBC transfer it is set on both the `MsgTransfer` and the transaction itself.
 
 **Returns:** `Promise<{hash: string, fee: bigint}>` - Object containing hash and fee
 

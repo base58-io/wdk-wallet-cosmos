@@ -135,10 +135,14 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
     /**
      * Transfers tokens to another address.
      *
-     * @param {TransferOptions} options - The transfer's options.
+     * @param {TransferOptions & { memo?: string }} options - The transfer's
+     *   options. When `memo` is set it replaces the default transaction memo;
+     *   on the IBC path it is also set on the `MsgTransfer` payload.
      * @returns {Promise<TransferResult>} The transfer's result.
      */
-    transfer(options: TransferOptions): Promise<TransferResult>;
+    transfer(options: TransferOptions & {
+        memo?: string;
+    }): Promise<TransferResult>;
     /**
      * The account's key pair.
      *

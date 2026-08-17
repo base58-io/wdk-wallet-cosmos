@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+  type MockInstance,
+} from 'vitest'
 import * as bip39 from 'bip39'
 import WalletManagerCosmos, {
   WalletAccountCosmos,
@@ -65,6 +73,9 @@ const BOB_ADDRESS_CHAIN_2 = 'wdk21m9l358xunhhwds0568za49mzhvuxx9uxs7puwd'
 
 const DEFAULT_TEST_GAS_PRICE_AMOUNT = 0.025
 
+// A caller-supplied memo, expected to replace the default on transfers.
+const CUSTOM_MEMO = 'order-12345'
+
 function createSignedTransaction(fee: string): TxRaw {
   return TxRaw.fromPartial({
     bodyBytes: new Uint8Array(),
@@ -113,6 +124,25 @@ async function withStubbedClient<T>(
     return await operation()
   } finally {
     connect.mockRestore()
+  }
+}
+
+/**
+ * Runs `operation` with `SigningStargateClient.connectWithSigner` stubbed to
+ * return `client`, so signing paths can be inspected without a chain.
+ */
+async function withStubbedSigningClient<T>(
+  client: Record<string, unknown>,
+  operation: (connectWithSigner: MockInstance) => Promise<T>
+): Promise<T> {
+  const connectWithSigner = vi
+    .spyOn(SigningStargateClient, 'connectWithSigner')
+    .mockResolvedValue(client as never)
+
+  try {
+    return await operation(connectWithSigner)
+  } finally {
+    connectWithSigner.mockRestore()
   }
 }
 
@@ -477,6 +507,82 @@ describe('WalletAccountCosmos', () => {
       ).rejects.toThrow('Exceeded maximum fee cost')
 
       wallet.dispose()
+    })
+
+    it('should pass a caller-supplied memo through the same-prefix branch', async () => {
+      const sendTokens = vi.fn().mockResolvedValue({ transactionHash: 'HASH' })
+
+      await withStubbedSigningClient({ sendTokens }, () =>
+        aliceAccount.transfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS,
+          amount: 1000,
+          memo: CUSTOM_MEMO,
+        })
+      )
+
+      expect(sendTokens).toHaveBeenCalledWith(
+        ALICE_ADDRESS,
+        BOB_ADDRESS,
+        [{ denom: 'stake', amount: '1000' }],
+        expect.anything(),
+        CUSTOM_MEMO
+      )
+    })
+
+    it('should default the memo when the same-prefix branch gets none', async () => {
+      const sendTokens = vi.fn().mockResolvedValue({ transactionHash: 'HASH' })
+
+      await withStubbedSigningClient({ sendTokens }, () =>
+        aliceAccount.transfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS,
+          amount: 1000,
+        })
+      )
+
+      expect(sendTokens.mock.calls[0][4]).toBe('Transfer via WDK')
+    })
+
+    it('should pass a caller-supplied memo through the IBC branch', async () => {
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ transactionHash: 'HASH' })
+
+      await withStubbedSigningClient({ signAndBroadcast }, () =>
+        aliceAccount.transfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS_CHAIN_2,
+          amount: 1000,
+          memo: CUSTOM_MEMO,
+        })
+      )
+
+      const [, messages, , txMemo] = signAndBroadcast.mock.calls[0]
+
+      // The memo has to reach both the MsgTransfer payload (where the
+      // destination chain reads it) and the transaction itself.
+      expect(messages[0].value.memo).toBe(CUSTOM_MEMO)
+      expect(txMemo).toBe(CUSTOM_MEMO)
+    })
+
+    it('should default the memo when the IBC branch gets none', async () => {
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ transactionHash: 'HASH' })
+
+      await withStubbedSigningClient({ signAndBroadcast }, () =>
+        aliceAccount.transfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS_CHAIN_2,
+          amount: 1000,
+        })
+      )
+
+      const [, messages, , txMemo] = signAndBroadcast.mock.calls[0]
+
+      expect(messages[0].value.memo).toBe('Transfer via WDK (IBC)')
+      expect(txMemo).toBe('Transfer via WDK (IBC)')
     })
 
     it('should transfer tokens', async () => {
