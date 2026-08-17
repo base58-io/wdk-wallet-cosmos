@@ -686,21 +686,30 @@ npm version 1.0.0-beta.5 -m "chore: release v%s"
 git push && git push --tags
 
 # 4. Publish. `prepublishOnly` regenerates types/ first.
-#    Pass --tag explicitly: npm defaults to `latest`, which would point the
-#    default install at a prerelease.
+#    2FA is on for writes, so this opens a browser challenge.
 npm publish --access public --tag beta
 
-# 5. Cut the GitHub release from the tag.
-gh release create v1.0.0-beta.5 --generate-notes --prerelease
+# 5. Move `latest` up too. Every published version so far is a prerelease,
+#    so `latest` has to point at one; npm refuses to delete the tag.
+#    Leaving it behind means `npm i <pkg>` installs an older beta.
+npm dist-tag add @base58-io/wdk-wallet-cosmos@1.0.0-beta.5 latest
+
+# 6. Cut the GitHub release from the tag. Do not pass --prerelease: GitHub
+#    will not give the "Latest" badge to a flagged prerelease, so the badge
+#    would stay stuck on the previous release.
+gh release create v1.0.0-beta.5 --generate-notes
 ```
 
-For a stable release, publish with `--tag latest` and drop `--prerelease`.
-
-Verify the dist-tags landed where you meant:
+Verify both landed where you meant:
 
 ```bash
 npm view @base58-io/wdk-wallet-cosmos dist-tags
+gh release list -L 3
 ```
+
+Once a stable 1.0.0 ships, step 4 becomes `--tag latest`, step 5 goes away, and
+subsequent betas should be flagged `--prerelease` so they stop stealing the
+badge from the stable release.
 
 ## License
 
