@@ -201,6 +201,7 @@ wallet.dispose()
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | [WalletManagerCosmos](#walletmanagercosmos) | Main class for managing Cosmos wallets. Extends `WalletManager` from `@tetherto/wdk-wallet`.              | [Constructor](#constructor), [Methods](#methods)     |
 | [WalletAccountCosmos](#walletaccountcosmos) | Individual Cosmos wallet account implementation. Implements `IWalletAccount<TxRaw>`.                        | [Creation](#creation), [Methods](#methods-1)          |
+| [WalletAccountCosmosReadOnly](#walletaccountcosmosreadonly) | Watch-only account holding no key material. Extends `WalletAccountReadOnly`.                | [Creation](#creation-1), [Methods](#methods-2)        |
 | `SeedSignerCosmos`                          | Memory-safe, derivable Cosmos signer backed by a BIP-39 seed.                                               | `derive`, `getAddress`, `sign`, `signDirect`, `signAmino`, `dispose` |
 
 ### WalletManagerCosmos
@@ -331,6 +332,10 @@ const signerAccount = await WalletAccountCosmos.fromSigner(signer, config)
 | `getBalance(denom?)`       | Returns the token balance (in base units). Uses `nativeDenom` from config if not specified | `Promise<bigint>`                      |
 | `getTokenBalance(denom)`   | Returns the balance of a specific token                                                    | `Promise<bigint>`                      |
 | `getTokenBalances(denoms)` | Returns balances of multiple specified tokens                                              | `Promise<Record<string, bigint>>`      |
+| `getTransaction(hash)`     | Returns a normalized, finality-based receipt                                                | `Promise<CosmosTransactionReceipt>`    |
+| `waitForTransaction(hash, options?)` | Polls `getTransaction` until the transaction reaches the requested finality       | `Promise<CosmosTransactionReceipt>`    |
+| `getTransactionReceipt(hash)` | Deprecated. Returns the raw CometBFT indexed transaction, or `null` if not yet in a block | `Promise<IndexedTx \| null>`           |
+| `toReadOnlyAccount()`      | Returns a `WalletAccountCosmosReadOnly` for this address, without key material              | `Promise<WalletAccountCosmosReadOnly>` |
 | `dispose()`                | Disposes the wallet account, clearing private keys from memory                             | `void`                                 |
 
 ##### `transfer(options)`
@@ -396,6 +401,47 @@ const aminoResult = await account.signAmino({
 // The public key needed to verify the signatures, base64 encoded.
 const publicKey = await account.getPublicKey()
 ```
+
+##### Tracking a transaction
+
+`getTransaction` returns a normalized receipt. CometBFT does not fork, so any
+transaction that made it into a block is reported as `final`; `success` reflects
+the ABCI code. It throws `NoSuchElementError` when the hash is unknown.
+
+`waitForTransaction` polls `getTransaction` on a 6 second cadence (one block) and
+is the method to use when waiting for confirmation. `getTransactionReceipt` is
+deprecated: it still returns the raw CometBFT indexed transaction, and returns
+`null` rather than throwing when the transaction is not in a block yet.
+
+```javascript
+const { hash } = await account.transfer({ token, recipient, amount })
+
+const receipt = await account.waitForTransaction(hash, { target: 'final' })
+// { hash, finality: 'final', success: true, block: 12345, fee: 500n, transaction }
+```
+
+### WalletAccountCosmosReadOnly
+
+A watch-only account: an address plus a chain configuration, with no key
+material. Extends `WalletAccountReadOnly` from `@tetherto/wdk-wallet`.
+
+#### Creation
+
+```javascript
+const readOnly = await account.toReadOnlyAccount()
+const standalone = WalletAccountCosmosReadOnly.fromAddress(address, config)
+```
+
+#### Methods
+
+Every read path of `WalletAccountCosmos` is available: `getAddress`,
+`getBalance`, `getTokenBalance`, `getTokenBalances`, `quoteTransfer`,
+`quoteSendTransaction`, `getTransaction`, `waitForTransaction`,
+`getTransactionReceipt` and `verify`.
+
+`verify` works without a private key: an ADR-36 `StdSignature` carries the public
+key it was made with, which must both derive the account's address and validate
+the signature.
 
 ## Supported Networks
 
@@ -577,9 +623,12 @@ npm run build:types
 ├── src/
 │   ├── memory-safe/
 │   │   └── secure-buffer.js       # Memory-safe buffer wrapper
+│   ├── signers/
+│   │   └── seed-signer-cosmos.js  # Derivable signer backed by a BIP-39 seed
 │   ├── chain-config-resolver.js   # Chain registry integration
 │   ├── gas-fee-utils.js           # Shared fee/gas estimation helpers and defaults
 │   ├── rpc-fallback.js            # RPC fallback with retry logic
+│   ├── wallet-account-cosmos-read-only.js  # Read paths, no key material
 │   ├── wallet-account-cosmos.js
 │   └── wallet-manager-cosmos.js
 ├── tests/

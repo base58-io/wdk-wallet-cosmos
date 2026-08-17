@@ -1,6 +1,10 @@
 'use strict'
 
-import WalletManager from '@tetherto/wdk-wallet'
+import WalletManager, {
+  AssertionError,
+  InvalidSignerError,
+  ProviderRequiredError,
+} from '@tetherto/wdk-wallet'
 import WalletAccountCosmos from './wallet-account-cosmos.js'
 import { resolveChainConfig } from './chain-config-resolver.js'
 import {
@@ -12,7 +16,8 @@ import {
 import SeedSignerCosmos from './signers/seed-signer-cosmos.js'
 
 /** @typedef {import('@tetherto/wdk-wallet').FeeRates} FeeRates */
-/** @typedef {import('@tetherto/wdk-wallet').SignerError} SignerError */
+/** @typedef {import('@tetherto/wdk-wallet').NoSuchElementError} NoSuchElementError */
+/** @typedef {import('@tetherto/wdk-wallet').UnsupportedOperationError} UnsupportedOperationError */
 /** @typedef {import('./signers/seed-signer-cosmos.js').ISignerCosmos} ISignerCosmos */
 /** @typedef {import('./wallet-account-cosmos.js').CosmosWalletConfig} CosmosWalletConfig */
 
@@ -36,7 +41,7 @@ export default class WalletManagerCosmos extends WalletManager {
         : /** @type {ISignerCosmos} */ (seedOrSigner)
 
     if (!signer || !signer.isDerivable) {
-      throw new Error(
+      throw new InvalidSignerError(
         'The default Cosmos signer must support account derivation.'
       )
     }
@@ -51,6 +56,15 @@ export default class WalletManagerCosmos extends WalletManager {
      * @type {CosmosWalletConfig}
      */
     this._config = config
+
+    /**
+     * The accounts derived so far, keyed by signer name and derivation path.
+     *
+     * @override
+     * @protected
+     * @type {CosmosAccountsMap}
+     */
+    this._accounts = {}
 
     /**
      * Whether this manager has been disposed.
@@ -75,11 +89,11 @@ export default class WalletManagerCosmos extends WalletManager {
    * Throws an error if this manager has been disposed.
    *
    * @protected
-   * @throws {Error} If the manager has been disposed.
+   * @throws {AssertionError} If the manager has been disposed.
    */
   _assertNotDisposed() {
     if (this._disposed) {
-      throw new Error('Cannot use disposed wallet manager')
+      throw new AssertionError('Cannot use disposed wallet manager')
     }
   }
 
@@ -90,8 +104,8 @@ export default class WalletManagerCosmos extends WalletManager {
    * @param {number} [index] - The index of the account to get (default: 0).
    * @param {{ signerName?: string }} [options] - Account options.
    * @returns {Promise<WalletAccountCosmos>} The account.
-   * @throws {Error} If the signer is not registered.
-   * @throws {SignerError} If the signer cannot derive accounts.
+   * @throws {NoSuchElementError} If the signer is not registered.
+   * @throws {UnsupportedOperationError} If the signer cannot derive accounts.
    */
 
   /**
@@ -113,7 +127,7 @@ export default class WalletManagerCosmos extends WalletManager {
     if (typeof indexOrSignerName === 'string') {
       const key = `${indexOrSignerName}#self`
       if (this._accounts[key]) {
-        return /** @type {WalletAccountCosmos} */ (this._accounts[key])
+        return this._accounts[key]
       }
 
       const signer = /** @type {ISignerCosmos} */ (
@@ -146,8 +160,8 @@ export default class WalletManagerCosmos extends WalletManager {
    * @param {string} path - The derivation path (e.g. "0'/0/0").
    * @param {{ signerName?: string }} [options] - Account options.
    * @returns {Promise<WalletAccountCosmos>} The account.
-   * @throws {Error} If the signer is not registered.
-   * @throws {SignerError} If the signer cannot derive accounts.
+   * @throws {NoSuchElementError} If the signer is not registered.
+   * @throws {UnsupportedOperationError} If the signer cannot derive accounts.
    */
   async getAccountByPath(path, options = {}) {
     this._assertNotDisposed()
@@ -164,7 +178,7 @@ export default class WalletManagerCosmos extends WalletManager {
       this._accounts[key] = account
     }
 
-    return /** @type {WalletAccountCosmos} */ (this._accounts[key])
+    return this._accounts[key]
   }
 
   /**
@@ -181,7 +195,7 @@ export default class WalletManagerCosmos extends WalletManager {
       !resolvedConfig.rpcEndpoints ||
       resolvedConfig.rpcEndpoints.length === 0
     ) {
-      throw new Error(
+      throw new ProviderRequiredError(
         'The wallet must be configured with an RPC endpoint to get fee rates.'
       )
     }
@@ -226,7 +240,7 @@ export default class WalletManagerCosmos extends WalletManager {
     }
 
     if (normalFeeRate === undefined || fastFeeRate === undefined) {
-      throw new Error(
+      throw new AssertionError(
         'Unable to derive fee rates from available gas price data.'
       )
     }

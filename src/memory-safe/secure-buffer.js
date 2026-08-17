@@ -1,6 +1,7 @@
 "use strict";
 
 // eslint-disable-next-line camelcase
+import { AssertionError } from "@tetherto/wdk-wallet";
 import { sodium_memzero } from "sodium-universal";
 
 /**
@@ -45,7 +46,7 @@ export default class SecureBuffer {
    */
   get buffer() {
     if (this._disposed) {
-      throw new Error("Cannot access disposed SecureBuffer");
+      throw new AssertionError("Cannot access disposed SecureBuffer");
     }
     return this._buffer;
   }
@@ -77,7 +78,7 @@ export default class SecureBuffer {
    */
   copy() {
     if (this._disposed) {
-      throw new Error("Cannot copy disposed SecureBuffer");
+      throw new AssertionError("Cannot copy disposed SecureBuffer");
     }
     return new Uint8Array(this._buffer);
   }

@@ -1,5 +1,6 @@
 'use strict'
 
+import { ValueError } from '@tetherto/wdk-wallet'
 import { chains } from 'chain-registry'
 
 /**
@@ -56,7 +57,7 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
  *
  * @param {CosmosWalletConfig} config - The wallet configuration.
  * @returns {ResolvedChainConfig} The resolved chain configuration.
- * @throws {Error} If chainName is provided but not found in registry.
+ * @throws {ValueError} If chainName is provided but not found in registry.
  *
  * @example
  * // Auto-config from registry
@@ -98,7 +99,7 @@ export function resolveChainConfig(config = {}) {
   const chainData = chains.find(chain => chain.chainName === config.chainName)
 
   if (!chainData) {
-    throw new Error(
+    throw new ValueError(
       `Chain "${config.chainName}" not found in chain-registry. ` +
         `Use custom config for local/private chains.`
     )

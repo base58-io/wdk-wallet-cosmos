@@ -1,3 +1,13 @@
+import { ISigner } from '@tetherto/wdk-wallet';
+export type AminoSignResponse = import('@cosmjs/amino').AminoSignResponse;
+export type StdSignature = import('@cosmjs/amino').StdSignature;
+export type StdSignDoc = import('@cosmjs/amino').StdSignDoc;
+export type AccountData = import('@cosmjs/proto-signing').AccountData;
+export type DirectSignResponse = import('@cosmjs/proto-signing').DirectSignResponse;
+export type KeyPair = import('@tetherto/wdk-wallet').KeyPair;
+export type SignDoc = import('cosmjs-types/cosmos/tx/v1beta1/tx').SignDoc;
+export type CosmosWalletConfig = import('../chain-config-resolver.js').CosmosWalletConfig;
+export type ResolvedChainConfig = import('../chain-config-resolver.js').ResolvedChainConfig;
 /**
  * Interface for Cosmos signers.
  *
@@ -7,7 +17,7 @@
  * @extends {ISigner}
  * @interface
  */
-export class ISignerCosmos extends ISigner {
+export declare class ISignerCosmos extends ISigner {
     /** @type {boolean} */
     get isDerivable(): boolean;
     /** @type {number | undefined} */
@@ -21,6 +31,8 @@ export class ISignerCosmos extends ISigner {
      * @returns {Promise<ISignerCosmos>}
      */
     derive(relPath: string): Promise<ISignerCosmos>;
+    /** @returns {Promise<string>} */
+    getAddress(): Promise<string>;
     /**
      * @param {string} message - Message to sign using ADR-36.
      * @returns {Promise<string>}
@@ -40,6 +52,7 @@ export class ISignerCosmos extends ISigner {
      * @returns {Promise<AminoSignResponse>}
      */
     signAmino(signerAddress: string, signDoc: StdSignDoc): Promise<AminoSignResponse>;
+    dispose(): void;
 }
 /**
  * Memory-safe, derivable Cosmos signer backed by a BIP-39 seed.
@@ -50,6 +63,26 @@ export class ISignerCosmos extends ISigner {
  * @extends {ISignerCosmos}
  */
 export default class SeedSignerCosmos extends ISignerCosmos {
+    /** @private @type {ResolvedChainConfig} */
+    _config;
+    /** @private @type {string} */
+    _relativePath;
+    /** @private @type {string} */
+    _path;
+    /** @private @type {SecureBuffer | undefined} */
+    _seed;
+    /** @private @type {SecureBuffer | undefined} */
+    _privateKey;
+    /** @private @type {Uint8Array | undefined} */
+    _publicKey;
+    /** @private @type {string | undefined} */
+    _address;
+    /** @private @type {DirectSecp256k1Wallet | undefined} */
+    _wallet;
+    /** @private @type {Promise<void> | undefined} */
+    _initializing;
+    /** @private */
+    _disposed;
     /**
      * @param {string | Uint8Array | null} seed - BIP-39 mnemonic or seed bytes.
      * @param {CosmosWalletConfig} [config] - Cosmos chain configuration.
@@ -59,34 +92,48 @@ export default class SeedSignerCosmos extends ISignerCosmos {
         path?: string;
         isChild?: boolean;
     });
-    /** @private @type {ResolvedChainConfig} */
-    private _config;
-    /** @private @type {string} */
-    private _relativePath;
-    /** @private @type {string} */
-    private _path;
-    /** @private @type {SecureBuffer | undefined} */
-    private _seed;
-    /** @private @type {SecureBuffer | undefined} */
-    private _privateKey;
-    /** @private @type {Uint8Array | undefined} */
-    private _publicKey;
-    /** @private @type {string | undefined} */
-    private _address;
-    /** @private @type {DirectSecp256k1Wallet | undefined} */
-    private _wallet;
-    /** @private @type {Promise<void> | undefined} */
-    private _initializing;
-    /** @private */
-    private _disposed;
+    /** @type {boolean} */
+    get isDerivable(): boolean;
+    /** @type {number | undefined} */
+    get index(): number | undefined;
     /** @type {string} */
     get path(): string;
+    /** @type {KeyPair} */
+    get keyPair(): KeyPair;
     /**
      * @param {string} relPath - Relative Cosmos BIP-44 path.
      * @returns {Promise<SeedSignerCosmos>}
-     * @throws {SignerError} If this signer cannot derive.
+     * @throws {UnsupportedOperationError} If this signer cannot derive.
      */
     derive(relPath: string): Promise<SeedSignerCosmos>;
+    /** @returns {Promise<string>} */
+    getAddress(): Promise<string>;
+    /**
+     * @param {string} message - Message to sign using ADR-36.
+     * @returns {Promise<string>}
+     */
+    sign(message: string): Promise<string>;
+    /** @returns {Promise<readonly AccountData[]>} */
+    getAccounts(): Promise<readonly AccountData[]>;
+    /**
+     * @param {string} signerAddress - Signer address.
+     * @param {SignDoc} signDoc - Direct sign document.
+     * @returns {Promise<DirectSignResponse>}
+     */
+    signDirect(signerAddress: string, signDoc: SignDoc): Promise<DirectSignResponse>;
+    /**
+     * Signs an amino (SIGN_MODE_LEGACY_AMINO_JSON) document.
+     *
+     * The document is signed as provided and echoed back in the response, which
+     * is what callers must use to assemble the broadcastable transaction.
+     *
+     * @param {string} signerAddress - Signer address, must match this signer's address.
+     * @param {StdSignDoc} signDoc - Amino sign document.
+     * @returns {Promise<AminoSignResponse>}
+     * @throws {ValueError} If the signer address does not belong to this signer.
+     */
+    signAmino(signerAddress: string, signDoc: StdSignDoc): Promise<AminoSignResponse>;
+    dispose(): void;
     /**
      * Signs a 32-byte hash with this signer's key, in the fixed-length (r || s)
      * encoding Cosmos expects.
@@ -109,13 +156,3 @@ export default class SeedSignerCosmos extends ISignerCosmos {
      */
     private _initializeFromSeed;
 }
-export type AminoSignResponse = import("@cosmjs/amino").AminoSignResponse;
-export type StdSignature = import("@cosmjs/amino").StdSignature;
-export type StdSignDoc = import("@cosmjs/amino").StdSignDoc;
-export type AccountData = import("@cosmjs/proto-signing").AccountData;
-export type DirectSignResponse = import("@cosmjs/proto-signing").DirectSignResponse;
-export type KeyPair = import("@tetherto/wdk-wallet").KeyPair;
-export type SignDoc = import("cosmjs-types/cosmos/tx/v1beta1/tx").SignDoc;
-export type CosmosWalletConfig = import("../chain-config-resolver.js").CosmosWalletConfig;
-export type ResolvedChainConfig = import("../chain-config-resolver.js").ResolvedChainConfig;
-import { ISigner } from '@tetherto/wdk-wallet';

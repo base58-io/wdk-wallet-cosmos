@@ -4,7 +4,7 @@
  * @param {Error} error - The error to evaluate.
  * @returns {boolean} True if the error should be thrown immediately (no retry).
  */
-export function shouldThrow(error: Error): boolean;
+export declare function shouldThrow(error: Error): boolean;
 /**
  * Calculates the retry delay using exponential backoff.
  * Formula: ~~(1 << attempt) * baseDelay
@@ -14,7 +14,17 @@ export function shouldThrow(error: Error): boolean;
  * @param {number} baseDelay - The base delay in milliseconds.
  * @returns {number} The delay in milliseconds before the next retry.
  */
-export function calculateRetryDelay(error: Error | null, attempt: number, baseDelay: number): number;
+export declare function calculateRetryDelay(error: Error | null, attempt: number, baseDelay: number): number;
+export type FallbackOptions = {
+    /**
+     * - Maximum number of retry rounds.
+     */
+    retryCount?: number;
+    /**
+     * - Base delay in ms for exponential backoff.
+     */
+    retryDelay?: number;
+};
 /**
  * @typedef {Object} FallbackOptions
  * @property {number} [retryCount=3] - Maximum number of retry rounds.
@@ -28,9 +38,10 @@ export function calculateRetryDelay(error: Error | null, attempt: number, baseDe
  * @param {(endpoint: string) => Promise<T>} operation - The async operation to execute.
  * @param {FallbackOptions} [options] - Fallback configuration options.
  * @returns {Promise<T>} The result of the successful operation.
- * @throws {Error} The last error if all endpoints and retries are exhausted.
+ * @throws {ValueError} If no endpoints are provided.
+ * @throws {ProviderError} If every endpoint and retry fails on a transport error.
  */
-export function withFallback<T>(endpoints: string[], operation: (endpoint: string) => Promise<T>, options?: FallbackOptions): Promise<T>;
+export declare function withFallback<T>(endpoints: string[], operation: (endpoint: string) => Promise<T>, options?: FallbackOptions): Promise<T>;
 /**
  * Creates a connection factory with fallback support.
  *
@@ -40,14 +51,4 @@ export function withFallback<T>(endpoints: string[], operation: (endpoint: strin
  * @param {FallbackOptions} [options] - Fallback configuration options.
  * @returns {() => Promise<T>} A function that returns a connected client.
  */
-export function createFallbackConnection<T>(endpoints: string[], connectFn: (endpoint: string) => Promise<T>, options?: FallbackOptions): () => Promise<T>;
-export type FallbackOptions = {
-    /**
-     * - Maximum number of retry rounds.
-     */
-    retryCount?: number | undefined;
-    /**
-     * - Base delay in ms for exponential backoff.
-     */
-    retryDelay?: number | undefined;
-};
+export declare function createFallbackConnection<T>(endpoints: string[], connectFn: (endpoint: string) => Promise<T>, options?: FallbackOptions): () => Promise<T>;

@@ -1,8 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as bip39 from 'bip39'
-import WalletManagerCosmos, { WalletAccountCosmos } from '../index.js'
+import WalletManagerCosmos, {
+  WalletAccountCosmos,
+  WalletAccountCosmosReadOnly,
+} from '../index.js'
 import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
-import { StargateClient } from '@cosmjs/stargate'
+import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
+import {
+  MaximumFeeExceededError,
+  NoSuchElementError,
+  ProviderRequiredError,
+} from '@tetherto/wdk-wallet'
 import {
   AuthInfo,
   TxRaw,
@@ -73,6 +81,39 @@ function createSignedTransaction(fee: string): TxRaw {
     ).finish(),
     signatures: [new Uint8Array()],
   })
+}
+
+/** Builds the `IndexedTx` shape `StargateClient.getTx` resolves with. */
+function createIndexedTx(overrides: Record<string, unknown> = {}) {
+  return {
+    hash: 'INDEXED_TRANSACTION_HASH',
+    height: 42,
+    txIndex: 0,
+    code: 0,
+    events: [],
+    rawLog: '',
+    tx: TxRaw.encode(createSignedTransaction('123')).finish(),
+    msgResponses: [],
+    gasUsed: BigInt(90_000),
+    gasWanted: BigInt(200_000),
+    ...overrides,
+  }
+}
+
+/** Runs `operation` with `StargateClient.connect` stubbed to return `client`. */
+async function withStubbedClient<T>(
+  client: Record<string, unknown>,
+  operation: () => Promise<T>
+): Promise<T> {
+  const connect = vi
+    .spyOn(StargateClient, 'connect')
+    .mockResolvedValue(client as never)
+
+  try {
+    return await operation()
+  } finally {
+    connect.mockRestore()
+  }
 }
 
 function resolveIbcDenom(sourceChannel: string, baseDenom: string): string {
@@ -525,6 +566,166 @@ describe('WalletAccountCosmos', () => {
         chain2BobWallet.dispose()
       }
     }, 150_000)
+  })
+
+  describe('getTransactionReceipt', () => {
+    it('should return null when the transaction is not in a block yet', async () => {
+      const getTx = vi.fn().mockResolvedValue(null)
+
+      const receipt = await withStubbedClient({ getTx }, () =>
+        aliceAccount.getTransactionReceipt('UNKNOWN_HASH')
+      )
+
+      expect(receipt).toBeNull()
+      expect(getTx).toHaveBeenCalledWith('UNKNOWN_HASH')
+    })
+  })
+
+  describe('getTransaction', () => {
+    it('should map an included transaction to a final receipt', async () => {
+      const getTx = vi.fn().mockResolvedValue(createIndexedTx())
+
+      const receipt = await withStubbedClient({ getTx }, () =>
+        aliceAccount.getTransaction('INDEXED_TRANSACTION_HASH')
+      )
+
+      expect(receipt).toMatchObject({
+        hash: 'INDEXED_TRANSACTION_HASH',
+        finality: 'final',
+        success: true,
+        block: 42,
+        fee: BigInt(123),
+      })
+    })
+
+    it('should report a non-zero ABCI code as an unsuccessful transaction', async () => {
+      const getTx = vi.fn().mockResolvedValue(createIndexedTx({ code: 5 }))
+
+      const receipt = await withStubbedClient({ getTx }, () =>
+        aliceAccount.getTransaction('INDEXED_TRANSACTION_HASH')
+      )
+
+      expect(receipt.success).toBe(false)
+      expect(receipt.finality).toBe('final')
+    })
+
+    it('should throw NoSuchElementError when the transaction is unknown', async () => {
+      const getTx = vi.fn().mockResolvedValue(null)
+
+      await withStubbedClient({ getTx }, async () => {
+        await expect(
+          aliceAccount.getTransaction('UNKNOWN_HASH')
+        ).rejects.toThrow(NoSuchElementError)
+      })
+    })
+  })
+
+  describe('toReadOnlyAccount', () => {
+    it('should return a read-only account exposing no key material', async () => {
+      const readOnlyAccount = await aliceAccount.toReadOnlyAccount()
+
+      expect(readOnlyAccount).toBeInstanceOf(WalletAccountCosmosReadOnly)
+      expect(readOnlyAccount).not.toBeInstanceOf(WalletAccountCosmos)
+      expect(await readOnlyAccount.getAddress()).toBe(ALICE_ADDRESS)
+      expect('keyPair' in readOnlyAccount).toBe(false)
+      expect('_signer' in readOnlyAccount).toBe(false)
+    })
+
+    it('should verify signatures from the account it was derived from', async () => {
+      const signature = await aliceAccount.sign('hello cosmos')
+      const readOnlyAccount = await aliceAccount.toReadOnlyAccount()
+
+      await expect(
+        readOnlyAccount.verify('hello cosmos', signature)
+      ).resolves.toBe(true)
+      await expect(
+        readOnlyAccount.verify('hello different cosmos', signature)
+      ).resolves.toBe(false)
+    })
+
+    it("should reject another account's signature", async () => {
+      const signature = await bobAccount.sign('hello cosmos')
+      const readOnlyAccount = await aliceAccount.toReadOnlyAccount()
+
+      await expect(
+        readOnlyAccount.verify('hello cosmos', signature)
+      ).resolves.toBe(false)
+    })
+
+    it('should outlive the disposal of the account it came from', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, IBC_CHAIN_1_CONFIG)
+      const readOnlyAccount = await (
+        await wallet.getAccount(0)
+      ).toReadOnlyAccount()
+
+      wallet.dispose()
+
+      expect(readOnlyAccount.isDisposed).toBe(false)
+      expect(await readOnlyAccount.getAddress()).toBe(ALICE_ADDRESS)
+    })
+  })
+
+  describe('error types', () => {
+    it('should throw ProviderRequiredError without an RPC endpoint', async () => {
+      const accountWithoutRpc = await WalletAccountCosmos.create(
+        ALICE_MNEMONIC,
+        "0'/0/0",
+        { addressPrefix: 'wdk' }
+      )
+
+      await expect(accountWithoutRpc.getBalance()).rejects.toThrow(
+        ProviderRequiredError
+      )
+
+      accountWithoutRpc.dispose()
+    })
+
+    it('should throw MaximumFeeExceededError without broadcasting a transfer', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        ...IBC_CHAIN_1_CONFIG,
+        transferMaxFee: 1,
+      })
+      const account = await wallet.getAccount(0)
+      const connectWithSigner = vi.spyOn(
+        SigningStargateClient,
+        'connectWithSigner'
+      )
+
+      try {
+        await expect(
+          account.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 1000,
+          })
+        ).rejects.toThrow(MaximumFeeExceededError)
+
+        expect(connectWithSigner).not.toHaveBeenCalled()
+      } finally {
+        connectWithSigner.mockRestore()
+        wallet.dispose()
+      }
+    })
+
+    it('should throw MaximumFeeExceededError without broadcasting a transaction', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        ...IBC_CHAIN_1_CONFIG,
+        transactionMaxFee: 100,
+      })
+      const account = await wallet.getAccount(0)
+      const connect = vi.spyOn(StargateClient, 'connect')
+
+      try {
+        await expect(
+          account.sendTransaction(createSignedTransaction('123'))
+        ).rejects.toThrow(MaximumFeeExceededError)
+
+        expect(connect).not.toHaveBeenCalled()
+      } finally {
+        connect.mockRestore()
+        wallet.dispose()
+      }
+    })
   })
 
   describe('dispose', () => {

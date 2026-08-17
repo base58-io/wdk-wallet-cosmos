@@ -1,5 +1,12 @@
 'use strict'
 
+import {
+  ProviderError,
+  ProviderErrorReason,
+  ValueError,
+  WdkError,
+} from '@tetherto/wdk-wallet'
+
 /**
  * Cosmos SDK ABCI error codes that should NOT be retried.
  * @see https://github.com/cosmos/cosmos-sdk/blob/main/types/errors/errors.go
@@ -102,6 +109,53 @@ export function calculateRetryDelay(error, attempt, baseDelay) {
 }
 
 /**
+ * Classifies a transport-level RPC failure.
+ *
+ * @param {Error} error - The error to classify.
+ * @returns {string} The matching provider error reason.
+ */
+function classifyProviderError(error) {
+  const message = error?.message ?? ''
+
+  if (/timeout|timed out|ETIMEDOUT|\b408\b/i.test(message)) {
+    return ProviderErrorReason.REQUEST_TIMEOUT
+  }
+  if (/\b401\b|unauthorized/i.test(message)) {
+    return ProviderErrorReason.UNAUTHORIZED
+  }
+  if (/\b403\b|forbidden/i.test(message)) {
+    return ProviderErrorReason.FORBIDDEN
+  }
+  if (/\b5\d\d\b|internal server error/i.test(message)) {
+    return ProviderErrorReason.INTERNAL_SERVER_ERROR
+  }
+
+  return ProviderErrorReason.NETWORK_ERROR
+}
+
+/**
+ * Surfaces a failed RPC call as a `ProviderError`.
+ *
+ * Only retryable transport failures are wrapped. Anything {@link shouldThrow}
+ * rejects outright (chain-level ABCI failures, malformed requests, unrecognized
+ * errors) is passed through: none of the provider reasons describe those, and
+ * callers relying on `instanceof ProviderError` must only see transient faults.
+ *
+ * @param {Error} error - The error that ended the fallback loop.
+ * @returns {Error} The error to throw.
+ */
+function toProviderError(error) {
+  if (error instanceof WdkError || shouldThrow(error)) {
+    return error
+  }
+
+  return new ProviderError(error?.message ?? 'The RPC request failed.', {
+    reason: classifyProviderError(error),
+    cause: error,
+  })
+}
+
+/**
  * @typedef {Object} FallbackOptions
  * @property {number} [retryCount=3] - Maximum number of retry rounds.
  * @property {number} [retryDelay=150] - Base delay in ms for exponential backoff.
@@ -115,11 +169,12 @@ export function calculateRetryDelay(error, attempt, baseDelay) {
  * @param {(endpoint: string) => Promise<T>} operation - The async operation to execute.
  * @param {FallbackOptions} [options] - Fallback configuration options.
  * @returns {Promise<T>} The result of the successful operation.
- * @throws {Error} The last error if all endpoints and retries are exhausted.
+ * @throws {ValueError} If no endpoints are provided.
+ * @throws {ProviderError} If every endpoint and retry fails on a transport error.
  */
 export async function withFallback(endpoints, operation, options = {}) {
   if (!endpoints || endpoints.length === 0) {
-    throw new Error('No RPC endpoints provided for fallback')
+    throw new ValueError('No RPC endpoints provided for fallback')
   }
 
   const retryCount = options.retryCount ?? 3
@@ -151,13 +206,17 @@ export async function withFallback(endpoints, operation, options = {}) {
         }
 
         if (isLastEndpoint && isLastAttempt) {
-          throw lastError
+          throw toProviderError(lastError)
         }
       }
     }
   }
 
-  throw lastError ?? new Error('All RPC endpoints failed')
+  throw lastError
+    ? toProviderError(lastError)
+    : new ProviderError('All RPC endpoints failed.', {
+        reason: ProviderErrorReason.NETWORK_ERROR,
+      })
 }
 
 /**

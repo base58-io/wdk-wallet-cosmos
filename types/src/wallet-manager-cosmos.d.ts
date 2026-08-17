@@ -1,11 +1,43 @@
+import WalletManager from '@tetherto/wdk-wallet';
+import WalletAccountCosmos from './wallet-account-cosmos.js';
+export type FeeRates = import('@tetherto/wdk-wallet').FeeRates;
+export type NoSuchElementError = import('@tetherto/wdk-wallet').NoSuchElementError;
+export type UnsupportedOperationError = import('@tetherto/wdk-wallet').UnsupportedOperationError;
+export type ISignerCosmos = import('./signers/seed-signer-cosmos.js').ISignerCosmos;
+export type CosmosWalletConfig = import('./wallet-account-cosmos.js').CosmosWalletConfig;
+export type CosmosAccountsMap = Object<string, WalletAccountCosmos>;
 /** @typedef {import('@tetherto/wdk-wallet').FeeRates} FeeRates */
-/** @typedef {import('@tetherto/wdk-wallet').SignerError} SignerError */
+/** @typedef {import('@tetherto/wdk-wallet').NoSuchElementError} NoSuchElementError */
+/** @typedef {import('@tetherto/wdk-wallet').UnsupportedOperationError} UnsupportedOperationError */
 /** @typedef {import('./signers/seed-signer-cosmos.js').ISignerCosmos} ISignerCosmos */
 /** @typedef {import('./wallet-account-cosmos.js').CosmosWalletConfig} CosmosWalletConfig */
 /**
  * @typedef {Object.<string, WalletAccountCosmos>} CosmosAccountsMap
  */
 export default class WalletManagerCosmos extends WalletManager {
+    /**
+     * The Cosmos wallet configuration.
+     *
+     * @override
+     * @protected
+     * @type {CosmosWalletConfig}
+     */
+    _config: CosmosWalletConfig;
+    /**
+     * The accounts derived so far, keyed by signer name and derivation path.
+     *
+     * @override
+     * @protected
+     * @type {CosmosAccountsMap}
+     */
+    _accounts: CosmosAccountsMap;
+    /**
+     * Whether this manager has been disposed.
+     *
+     * @protected
+     * @type {boolean}
+     */
+    _disposed: boolean;
     /**
      * Creates a new wallet manager for Cosmos blockchains.
      *
@@ -15,13 +47,6 @@ export default class WalletManagerCosmos extends WalletManager {
      * @param {CosmosWalletConfig} [config] - The configuration object.
      */
     constructor(seedOrSigner: string | Uint8Array | ISignerCosmos, config?: CosmosWalletConfig);
-    /**
-     * Whether this manager has been disposed.
-     *
-     * @protected
-     * @type {boolean}
-     */
-    protected _disposed: boolean;
     /**
      * Returns the Cosmos wallet configuration.
      *
@@ -33,29 +58,12 @@ export default class WalletManagerCosmos extends WalletManager {
      * Throws an error if this manager has been disposed.
      *
      * @protected
-     * @throws {Error} If the manager has been disposed.
+     * @throws {AssertionError} If the manager has been disposed.
      */
     protected _assertNotDisposed(): void;
-    /**
-     * Returns the wallet account at a specific index (see BIP-44).
-     *
-     * @overload
-     * @param {number} [index] - The index of the account to get (default: 0).
-     * @param {{ signerName?: string }} [options] - Account options.
-     * @returns {Promise<WalletAccountCosmos>} The account.
-     * @throws {Error} If the signer is not registered.
-     * @throws {SignerError} If the signer cannot derive accounts.
-     */
-    getAccount(index?: number | undefined, options?: {
+    getAccount(index?: number, options?: {
         signerName?: string;
-    } | undefined): Promise<WalletAccountCosmos>;
-    /**
-     * Returns the account associated with a named signer.
-     *
-     * @overload
-     * @param {string} signerName - The registered signer name.
-     * @returns {Promise<WalletAccountCosmos>} The account.
-     */
+    }): Promise<WalletAccountCosmos>;
     getAccount(signerName: string): Promise<WalletAccountCosmos>;
     /**
      * Returns the wallet account at a specific BIP-44 derivation path.
@@ -66,25 +74,27 @@ export default class WalletManagerCosmos extends WalletManager {
      * @param {string} path - The derivation path (e.g. "0'/0/0").
      * @param {{ signerName?: string }} [options] - Account options.
      * @returns {Promise<WalletAccountCosmos>} The account.
-     * @throws {Error} If the signer is not registered.
-     * @throws {SignerError} If the signer cannot derive accounts.
+     * @throws {NoSuchElementError} If the signer is not registered.
+     * @throws {UnsupportedOperationError} If the signer cannot derive accounts.
      */
     getAccountByPath(path: string, options?: {
         signerName?: string;
     }): Promise<WalletAccountCosmos>;
+    /**
+     * Returns the current fee rates.
+     *
+     * @returns {Promise<FeeRates>} The fee rates (in uatom).
+     */
+    getFeeRates(): Promise<FeeRates>;
     /**
      * Whether this manager has been disposed.
      *
      * @type {boolean}
      */
     get isDisposed(): boolean;
+    /**
+     * Disposes the wallet manager and all its accounts, securely erasing all sensitive data from memory.
+     * After calling this method, the manager can no longer be used.
+     */
+    dispose(): void;
 }
-export type FeeRates = import("@tetherto/wdk-wallet").FeeRates;
-export type SignerError = import("@tetherto/wdk-wallet").SignerError;
-export type ISignerCosmos = import("./signers/seed-signer-cosmos.js").ISignerCosmos;
-export type CosmosWalletConfig = import("./wallet-account-cosmos.js").CosmosWalletConfig;
-export type CosmosAccountsMap = {
-    [x: string]: WalletAccountCosmos;
-};
-import WalletManager from '@tetherto/wdk-wallet';
-import WalletAccountCosmos from './wallet-account-cosmos.js';

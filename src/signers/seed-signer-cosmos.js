@@ -8,7 +8,13 @@ import {
 import { Secp256k1, Slip10, Slip10Curve, sha256, stringToPath } from '@cosmjs/crypto'
 import { toBase64 } from '@cosmjs/encoding'
 import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
-import { ISigner, NotImplementedError, SignerError } from '@tetherto/wdk-wallet'
+import {
+  AssertionError,
+  ISigner,
+  NotImplementedError,
+  UnsupportedOperationError,
+  ValueError,
+} from '@tetherto/wdk-wallet'
 import * as bip39 from 'bip39'
 import { resolveChainConfig } from '../chain-config-resolver.js'
 import SecureBuffer from '../memory-safe/secure-buffer.js'
@@ -150,12 +156,12 @@ export default class SeedSignerCosmos extends ISignerCosmos {
     super()
 
     if (!options.isChild && seed === null) {
-      throw new Error('A seed is required for a root Cosmos signer.')
+      throw new ValueError('A seed is required for a root Cosmos signer.')
     }
 
     if (typeof seed === 'string') {
       if (!bip39.validateMnemonic(seed)) {
-        throw new Error('The seed phrase is invalid.')
+        throw new ValueError('The seed phrase is invalid.')
       }
       seed = bip39.mnemonicToSeedSync(seed)
     }
@@ -213,12 +219,12 @@ export default class SeedSignerCosmos extends ISignerCosmos {
   /**
    * @param {string} relPath - Relative Cosmos BIP-44 path.
    * @returns {Promise<SeedSignerCosmos>}
-   * @throws {SignerError} If this signer cannot derive.
+   * @throws {UnsupportedOperationError} If this signer cannot derive.
    */
   async derive(relPath) {
     this._assertNotDisposed()
     if (!this._seed || this._seed.isDisposed) {
-      throw new SignerError('This Cosmos signer does not support derivation.')
+      throw new UnsupportedOperationError('derive(relPath)')
     }
 
     const child = new SeedSignerCosmos(null, this._config, {
@@ -279,13 +285,13 @@ export default class SeedSignerCosmos extends ISignerCosmos {
    * @param {string} signerAddress - Signer address, must match this signer's address.
    * @param {StdSignDoc} signDoc - Amino sign document.
    * @returns {Promise<AminoSignResponse>}
-   * @throws {SignerError} If the signer address does not belong to this signer.
+   * @throws {ValueError} If the signer address does not belong to this signer.
    */
   async signAmino(signerAddress, signDoc) {
     await this._initialize()
 
     if (signerAddress !== this._address) {
-      throw new SignerError(`Address ${signerAddress} not found in wallet`)
+      throw new ValueError(`Address ${signerAddress} not found in wallet`)
     }
 
     return {
@@ -330,7 +336,7 @@ export default class SeedSignerCosmos extends ISignerCosmos {
   /** @private */
   _assertNotDisposed() {
     if (this._disposed) {
-      throw new Error('Cannot use disposed Cosmos signer.')
+      throw new AssertionError('Cannot use disposed Cosmos signer.')
     }
   }
 
@@ -338,7 +344,7 @@ export default class SeedSignerCosmos extends ISignerCosmos {
   _assertInitialized() {
     this._assertNotDisposed()
     if (!this._privateKey || !this._publicKey || !this._address || !this._wallet) {
-      throw new Error('Cosmos signer has not been initialized.')
+      throw new AssertionError('Cosmos signer has not been initialized.')
     }
   }
 
@@ -347,7 +353,7 @@ export default class SeedSignerCosmos extends ISignerCosmos {
     this._assertNotDisposed()
     if (this._wallet) return
     if (!this._seed) {
-      throw new Error('Cosmos signer has no key material.')
+      throw new AssertionError('Cosmos signer has no key material.')
     }
     if (!this._initializing) {
       this._initializing = this._initializeFromSeed(this._seed.buffer)

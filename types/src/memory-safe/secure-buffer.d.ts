@@ -5,39 +5,25 @@
  */
 export default class SecureBuffer {
     /**
-     * Creates a SecureBuffer from a hex string.
-     *
-     * @param {string} hex - The hex string (with or without 0x prefix).
-     * @returns {SecureBuffer} The secure buffer.
-     */
-    static fromHex(hex: string): SecureBuffer;
-    /**
-     * Securely zeroes a Uint8Array without creating a SecureBuffer.
-     * Useful for cleaning up temporary buffers.
-     *
-     * @param {Uint8Array} buffer - The buffer to zero.
-     */
-    static zero(buffer: Uint8Array): void;
-    /**
-     * Creates a new SecureBuffer.
-     *
-     * @param {Uint8Array} data - The sensitive data to store.
-     */
-    constructor(data: Uint8Array);
-    /**
      * The underlying buffer containing sensitive data.
      *
      * @private
      * @type {Uint8Array}
      */
-    private _buffer;
+    _buffer;
     /**
      * Whether this buffer has been disposed.
      *
      * @private
      * @type {boolean}
      */
-    private _disposed;
+    _disposed;
+    /**
+     * Creates a new SecureBuffer.
+     *
+     * @param {Uint8Array} data - The sensitive data to store.
+     */
+    constructor(data: Uint8Array);
     /**
      * Returns the underlying buffer.
      * Throws if the buffer has been disposed.
@@ -71,4 +57,18 @@ export default class SecureBuffer {
      * This operation is irreversible.
      */
     dispose(): void;
+    /**
+     * Creates a SecureBuffer from a hex string.
+     *
+     * @param {string} hex - The hex string (with or without 0x prefix).
+     * @returns {SecureBuffer} The secure buffer.
+     */
+    static fromHex(hex: string): SecureBuffer;
+    /**
+     * Securely zeroes a Uint8Array without creating a SecureBuffer.
+     * Useful for cleaning up temporary buffers.
+     *
+     * @param {Uint8Array} buffer - The buffer to zero.
+     */
+    static zero(buffer: Uint8Array): void;
 }

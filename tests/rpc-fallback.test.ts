@@ -4,6 +4,7 @@ import {
   calculateRetryDelay,
   withFallback,
 } from '../src/rpc-fallback.js'
+import { ProviderError, ProviderErrorReason } from '@tetherto/wdk-wallet'
 
 describe('shouldThrow', () => {
   describe('ABCI error codes', () => {
@@ -212,5 +213,36 @@ describe('withFallback', () => {
       })
     ).rejects.toThrow('timeout')
     expect(operation).toHaveBeenCalledTimes(3)
+  })
+
+  it('surfaces an exhausted transport failure as a ProviderError', async () => {
+    vi.useRealTimers()
+
+    const operation = vi.fn().mockRejectedValue(new Error('fetch failed'))
+
+    await expect(
+      withFallback(['ep1'], operation, { retryCount: 0 })
+    ).rejects.toThrow(ProviderError)
+    await expect(
+      withFallback(['ep1'], operation, { retryCount: 0 })
+    ).rejects.toMatchObject({ reason: ProviderErrorReason.NETWORK_ERROR })
+  })
+
+  it('classifies a timed-out endpoint as a request timeout', async () => {
+    vi.useRealTimers()
+
+    const operation = vi.fn().mockRejectedValue(new Error('Request timeout'))
+
+    await expect(
+      withFallback(['ep1'], operation, { retryCount: 0 })
+    ).rejects.toMatchObject({ reason: ProviderErrorReason.REQUEST_TIMEOUT })
+  })
+
+  it('passes chain-level failures through unwrapped', async () => {
+    const operation = vi.fn().mockRejectedValue(new Error('insufficient funds'))
+
+    await expect(withFallback(['ep1'], operation)).rejects.not.toBeInstanceOf(
+      ProviderError
+    )
   })
 })

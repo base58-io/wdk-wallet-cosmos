@@ -5,6 +5,11 @@ import WalletManagerCosmos, {
   WalletAccountCosmos,
 } from '../index.js'
 import {
+  InvalidSignerError,
+  ProviderRequiredError,
+  UnsupportedOperationError,
+} from '@tetherto/wdk-wallet'
+import {
   DEFAULT_GAS_PRICE_STEP,
   DEFAULT_TRANSFER_GAS_LIMIT,
   calculateFeeAmountFromGasPrice,
@@ -227,6 +232,49 @@ describe('WalletManagerCosmos', () => {
 
       await expect(walletWithoutRpc.getFeeRates()).rejects.toThrow(
         'The wallet must be configured with an RPC endpoint to get fee rates.'
+      )
+
+      walletWithoutRpc.dispose()
+    })
+  })
+
+  describe('error types', () => {
+    it('should throw InvalidSignerError for a non-derivable default signer', async () => {
+      const rootSigner = new SeedSignerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+      const childSigner = await rootSigner.derive("0'/0/0")
+      rootSigner.dispose()
+
+      expect(childSigner.isDerivable).toBe(false)
+      expect(() => new WalletManagerCosmos(childSigner, {})).toThrow(
+        InvalidSignerError
+      )
+
+      childSigner.dispose()
+    })
+
+    it('should throw UnsupportedOperationError when deriving from a child signer', async () => {
+      const rootSigner = new SeedSignerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+      const childSigner = await rootSigner.derive("0'/0/0")
+      rootSigner.dispose()
+
+      await expect(childSigner.derive("0'/0/1")).rejects.toThrow(
+        UnsupportedOperationError
+      )
+
+      childSigner.dispose()
+    })
+
+    it('should throw ProviderRequiredError without an RPC endpoint', async () => {
+      const walletWithoutRpc = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+
+      await expect(walletWithoutRpc.getFeeRates()).rejects.toThrow(
+        ProviderRequiredError
       )
 
       walletWithoutRpc.dispose()
