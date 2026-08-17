@@ -1,3 +1,8 @@
+/**
+ * Offline `WalletAccountCosmos` tests. Nothing here reaches a chain: RPC
+ * clients are either stubbed or never constructed, so this suite runs in CI.
+ * Chain-backed assertions live in wallet-account-cosmos.integration.test.ts.
+ */
 import {
   describe,
   it,
@@ -7,7 +12,6 @@ import {
   vi,
   type MockInstance,
 } from 'vitest'
-import * as bip39 from 'bip39'
 import WalletManagerCosmos, {
   WalletAccountCosmos,
   WalletAccountCosmosReadOnly,
@@ -23,55 +27,21 @@ import {
   AuthInfo,
   TxRaw,
 } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
-import { createHash } from 'crypto'
 import {
   DEFAULT_TRANSFER_GAS_LIMIT,
   calculateFeeAmountFromGasPrice,
 } from '../src/gas-fee-utils.js'
-
-const IBC_CHAIN_1_CONFIG = {
-  rpcEndpoints: ['http://localhost:26657'],
-  addressPrefix: 'wdk',
-  nativeDenom: 'stake',
-  gasPrice: '0.025stake',
-  ibcChannels: {
-    wdk2: {
-      sourceChannel: 'channel-0',
-    },
-  },
-}
-
-const IBC_CHAIN_2_CONFIG = {
-  rpcEndpoints: ['http://localhost:26658'],
-  addressPrefix: 'wdk2',
-  nativeDenom: 'stake',
-  gasPrice: '0.025stake',
-  ibcChannels: {
-    wdk: {
-      sourceChannel: 'channel-0',
-    },
-  },
-}
-
-// Alice mnemonic from Ignite output (for local/dev use only)
-const ALICE_MNEMONIC =
-  'car knock victory oval pulse practice draw bulb fiction bulb involve dumb stairs discover update spatial blouse perfect match property wheat defense host fortune'
-
-// Bob mnemonic from Ignite output (for local/dev use only)
-const BOB_MNEMONIC =
-  'banner spread envelope side kite person disagree path silver will brother under couch edit food venture squirrel civil budget number acquire point work mass'
-
-const INVALID_MNEMONIC = 'invalid seed phrase that should not work'
-
-const ALICE_SEED = bip39.mnemonicToSeedSync(ALICE_MNEMONIC)
-
-// Alice and Bob addresses from Ignite output (Bech32 with `wdk` prefix)
-const ALICE_ADDRESS = 'wdk1jvjy9gpu95k9uaez7ncydkaurcqpcpye7znlz5'
-const BOB_ADDRESS = 'wdk1m9l358xunhhwds0568za49mzhvuxx9uxv52xme'
-
-const BOB_ADDRESS_CHAIN_2 = 'wdk21m9l358xunhhwds0568za49mzhvuxx9uxs7puwd'
-
-const DEFAULT_TEST_GAS_PRICE_AMOUNT = 0.025
+import {
+  ALICE_ADDRESS,
+  ALICE_MNEMONIC,
+  ALICE_SEED,
+  BOB_ADDRESS,
+  BOB_ADDRESS_CHAIN_2,
+  BOB_MNEMONIC,
+  DEFAULT_TEST_GAS_PRICE_AMOUNT,
+  IBC_CHAIN_1_CONFIG,
+  INVALID_MNEMONIC,
+} from './fixtures.js'
 
 // A caller-supplied memo, expected to replace the default on transfers.
 const CUSTOM_MEMO = 'order-12345'
@@ -144,15 +114,6 @@ async function withStubbedSigningClient<T>(
   } finally {
     connectWithSigner.mockRestore()
   }
-}
-
-function resolveIbcDenom(sourceChannel: string, baseDenom: string): string {
-  const denomTrace = `transfer/${sourceChannel}/${baseDenom}`
-  const hash = createHash('sha256')
-    .update(denomTrace)
-    .digest('hex')
-    .toUpperCase()
-  return `ibc/${hash}`
 }
 
 describe('WalletAccountCosmos', () => {
@@ -303,13 +264,6 @@ describe('WalletAccountCosmos', () => {
 
       accountWithoutRpc.dispose()
     })
-
-    it('should return the correct balance of the account', async () => {
-      const balance = await aliceAccount.getBalance('stake')
-
-      expect(typeof balance).toBe('bigint')
-      expect(balance).toBeGreaterThan(BigInt(0))
-    })
   })
 
   describe('getTokenBalance', () => {
@@ -326,19 +280,6 @@ describe('WalletAccountCosmos', () => {
 
       accountWithoutRpc.dispose()
     })
-
-    it('should return the correct token balance of the account', async () => {
-      const tokenBalance = await aliceAccount.getTokenBalance('token')
-
-      expect(typeof tokenBalance).toBe('bigint')
-      expect(tokenBalance).toBeGreaterThan(BigInt(0))
-    })
-
-    it('should use nativeDenom from config for default balance check', async () => {
-      const defaultDenomBalance = await aliceAccount.getBalance() // No denom passed
-      const stakeBalance = await aliceAccount.getBalance('stake')
-      expect(defaultDenomBalance).toBe(stakeBalance)
-    })
   })
 
   describe('getTokenBalances', () => {
@@ -354,37 +295,6 @@ describe('WalletAccountCosmos', () => {
       ).rejects.toThrow('The wallet must be configured with an RPC endpoint.')
 
       accountWithoutRpc.dispose()
-    })
-
-    it('should return the correct balances for multiple tokens', async () => {
-      const balances = await aliceAccount.getTokenBalances(['stake', 'token'])
-
-      expect(typeof balances.stake).toBe('bigint')
-      expect(typeof balances.token).toBe('bigint')
-      expect(balances.stake).toBeGreaterThan(BigInt(0))
-      expect(balances.token).toBeGreaterThan(BigInt(0))
-    })
-
-    it('should return only requested balances', async () => {
-      const balances = await aliceAccount.getTokenBalances(['token'])
-
-      expect(typeof balances.token).toBe('bigint')
-      expect(balances.token).toBeGreaterThan(BigInt(0))
-    })
-
-    it('should ignore tokens that the account does not hold', async () => {
-      const balances = await aliceAccount.getTokenBalances([
-        'stake',
-        'nonexistent',
-      ])
-      const expectedStakeBalance = await aliceAccount.getBalance('stake')
-
-      expect(balances).toEqual({
-        stake: expectedStakeBalance,
-      })
-      expect(
-        Object.prototype.hasOwnProperty.call(balances, 'nonexistent')
-      ).toBe(false)
     })
   })
 
@@ -436,23 +346,16 @@ describe('WalletAccountCosmos', () => {
       const broadcastTx = vi.fn().mockResolvedValue({
         transactionHash: 'SIGNED_TRANSACTION_HASH',
       })
-      const connect = vi
-        .spyOn(StargateClient, 'connect')
-        .mockResolvedValue({ broadcastTx } as never)
 
-      try {
-        const result = await aliceAccount.sendTransaction(
-          createSignedTransaction('123')
-        )
+      const result = await withStubbedClient({ broadcastTx }, () =>
+        aliceAccount.sendTransaction(createSignedTransaction('123'))
+      )
 
-        expect(result).toEqual({
-          hash: 'SIGNED_TRANSACTION_HASH',
-          fee: BigInt(123),
-        })
-        expect(broadcastTx).toHaveBeenCalledOnce()
-      } finally {
-        connect.mockRestore()
-      }
+      expect(result).toEqual({
+        hash: 'SIGNED_TRANSACTION_HASH',
+        fee: BigInt(123),
+      })
+      expect(broadcastTx).toHaveBeenCalledOnce()
     })
 
     it('should enforce transactionMaxFee before broadcasting a signed transaction', async () => {
@@ -584,94 +487,6 @@ describe('WalletAccountCosmos', () => {
       expect(messages[0].value.memo).toBe('Transfer via WDK (IBC)')
       expect(txMemo).toBe('Transfer via WDK (IBC)')
     })
-
-    it('should transfer tokens', async () => {
-      const aliceBalanceBefore = await aliceAccount.getBalance('token')
-      const bobBalanceBefore = await bobAccount.getBalance('token')
-
-      const transfer = await bobAccount.transfer({
-        token: 'token',
-        recipient: ALICE_ADDRESS,
-        amount: 1000,
-      })
-
-      expect(transfer).toBeDefined()
-
-      const aliceBalanceAfter = await aliceAccount.getBalance('token')
-      const bobBalanceAfter = await bobAccount.getBalance('token')
-
-      expect(bobBalanceAfter).toBe(bobBalanceBefore - BigInt(1000))
-      expect(aliceBalanceAfter).toBe(aliceBalanceBefore + BigInt(1000))
-    })
-
-    it('should deduct correct fee from sender balance', async () => {
-      const balanceBefore = await bobAccount.getBalance('stake')
-
-      await bobAccount.transfer({
-        token: 'token',
-        recipient: ALICE_ADDRESS,
-        amount: 1000,
-      })
-
-      const balanceAfter = await bobAccount.getBalance('stake')
-      const expectedFee = calculateFeeAmountFromGasPrice(
-        DEFAULT_TEST_GAS_PRICE_AMOUNT,
-        DEFAULT_TRANSFER_GAS_LIMIT
-      )
-
-      expect(expectedFee).toBeDefined()
-      expect(balanceBefore - balanceAfter).toBe(expectedFee)
-    })
-
-    it('should transfer native stake from wdkdev (wdk) to wdkdev2 (wdk2) via IBC', async () => {
-      const chain1AliceWallet = new WalletManagerCosmos(
-        ALICE_MNEMONIC,
-        IBC_CHAIN_1_CONFIG
-      )
-      const chain1AliceAccount = await chain1AliceWallet.getAccount(0)
-
-      const chain2BobWallet = new WalletManagerCosmos(
-        BOB_MNEMONIC,
-        IBC_CHAIN_2_CONFIG
-      )
-      const chain2BobAccount = await chain2BobWallet.getAccount(0)
-
-      try {
-        const aliceAddress = await chain1AliceAccount.getAddress()
-        const bobAddress = await chain2BobAccount.getAddress()
-
-        expect(aliceAddress).toBe(ALICE_ADDRESS)
-        expect(bobAddress).toBe(BOB_ADDRESS_CHAIN_2)
-
-        const baseDenom = 'stake'
-        const sourceChannel = IBC_CHAIN_1_CONFIG.ibcChannels.wdk2.sourceChannel
-        const destinationIbcDenom = resolveIbcDenom(sourceChannel, baseDenom)
-
-        const bobIbcBalanceBefore =
-          await chain2BobAccount.getBalance(destinationIbcDenom)
-
-        const transferAmount = 1000
-        const transferResult = await chain1AliceAccount.transfer({
-          token: baseDenom,
-          recipient: bobAddress,
-          amount: transferAmount,
-        })
-
-        expect(transferResult.hash).toBeTypeOf('string')
-        expect(transferResult.hash.length).toBeGreaterThan(0)
-        expect(transferResult.fee).toBeGreaterThan(BigInt(0))
-
-        const bobIbcBalanceAfter =
-          await chain2BobAccount.getBalance(destinationIbcDenom)
-
-        expect(bobIbcBalanceAfter - bobIbcBalanceBefore).toBe(
-          BigInt(transferAmount)
-        )
-      } finally {
-        chain1AliceWallet.dispose()
-        chain2BobWallet.dispose()
-      }
-    }, 150_000)
   })
 
   describe('getTransactionReceipt', () => {

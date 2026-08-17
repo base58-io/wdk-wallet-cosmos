@@ -527,18 +527,30 @@ npm install
 
 ### Running Tests
 
-> ⚠️ **Important**: Tests require a running Ignite chain. You must start the local testnet before running tests.
+Tests are split in two. `npm test` runs the offline suite, which stubs or skips
+every RPC client and needs nothing running. This is what CI runs.
+
+```bash
+npm test
+```
+
+`npm run test:integration` runs the chain-backed suite (`*.integration.test.ts`)
+against the local testnet.
+
+> ⚠️ **Important**: The integration suite requires a running Ignite chain.
 >
-> Currently, there is no snapshot/restore mechanism, so **the chain must be reset before each test run** to ensure consistent initial balances.
+> There is no snapshot/restore mechanism, so **the chain must be reset before each
+> run** to ensure consistent initial balances. Repeat runs against a dirty chain
+> will fail on balance assertions.
 
 ```bash
 # 1. Start the local testnet (in a separate terminal)
 docker compose up
 
-# 2. Run tests
-npm test
+# 2. Run the chain-backed tests
+npm run test:integration
 
-# To reset the chain before running tests again:
+# To reset the chain before running them again:
 docker compose down -v
 docker compose up
 ```
@@ -655,6 +667,39 @@ npm run build:types
 ├── scripts/
 │   └── setup-ibc.sh               # IBC setup script
 └── docker-compose.yml
+```
+
+## Releasing
+
+Releases are cut and published from a maintainer's machine. CI only verifies
+(typecheck + offline tests); it does not publish.
+
+```bash
+# 1. Verify. `npm version` will refuse to run on a dirty tree.
+npm test
+npm run build:types
+
+# 2. Bump. This writes package.json, commits, and tags v<version>.
+npm version 1.0.0-beta.5 -m "chore: release v%s"
+
+# 3. Push the commit and the tag.
+git push && git push --tags
+
+# 4. Publish. `prepublishOnly` regenerates types/ first.
+#    Pass --tag explicitly: npm defaults to `latest`, which would point the
+#    default install at a prerelease.
+npm publish --access public --tag beta
+
+# 5. Cut the GitHub release from the tag.
+gh release create v1.0.0-beta.5 --generate-notes --prerelease
+```
+
+For a stable release, publish with `--tag latest` and drop `--prerelease`.
+
+Verify the dist-tags landed where you meant:
+
+```bash
+npm view @base58-io/wdk-wallet-cosmos dist-tags
 ```
 
 ## License
