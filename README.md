@@ -67,6 +67,7 @@ const hybridWallet = new WalletManagerCosmos(seedPhrase, {
 })
 
 // Option 4: Use a derivable Cosmos signer
+// (signers are also exported from '@base58-io/wdk-wallet-cosmos/signers')
 const signer = new SeedSignerCosmos(seedPhrase, {
   chainName: 'cosmoshub',
 })
@@ -495,11 +496,12 @@ await wallet.getAccount(0) // DisposalError: The wallet manager has been dispose
 
 ## Platform Support
 
-| Platform     | Status | Notes              |
-| ------------ | ------ | ------------------ |
-| Node.js      | ✅     | Full support       |
-| Browser      | ✅     | Full support       |
-| React Native | ⚠️     | Requires polyfills |
+| Platform     | Status | Notes                                        |
+| ------------ | ------ | -------------------------------------------- |
+| Node.js      | ✅     | Full support                                 |
+| Bare         | ✅     | Resolved through the `bare` export condition |
+| Browser      | ✅     | Full support                                 |
+| React Native | ⚠️     | Requires polyfills                           |
 
 ### React Native Setup
 
@@ -649,6 +651,7 @@ npm run build:types
 │   ├── memory-safe/
 │   │   └── secure-buffer.js       # Memory-safe buffer wrapper
 │   ├── signers/
+│   │   ├── index.js               # `./signers` subpath entry (`bare.js` for Bare)
 │   │   └── seed-signer-cosmos.js  # Derivable signer backed by a BIP-39 seed
 │   ├── chain-config-resolver.js   # Chain registry integration
 │   ├── gas-fee-utils.js           # Shared fee/gas estimation helpers and defaults

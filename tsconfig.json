@@ -1,5 +1,6 @@
 {
   "include": ["index.js", "src", "tests", "global.d.ts"],
+  "exclude": ["src/signers/bare.js"],
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",
