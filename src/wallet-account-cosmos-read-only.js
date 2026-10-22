@@ -11,7 +11,7 @@ import { fromBase64, toBase64 } from '@cosmjs/encoding'
 import { decodeTxRaw } from '@cosmjs/proto-signing'
 import { StargateClient } from '@cosmjs/stargate'
 import {
-  AssertionError,
+  DisposalError,
   MaximumFeeExceededError,
   NoSuchElementError,
   ProviderRequiredError,
@@ -160,7 +160,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
    *
    * @type {boolean}
    */
-  get isDisposed() {
+  get disposed() {
     return false
   }
 
@@ -168,11 +168,11 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
    * Throws if this account has been disposed.
    *
    * @protected
-   * @throws {AssertionError} If the account has been disposed.
+   * @throws {DisposalError} If the account has been disposed.
    */
   _assertNotDisposed() {
-    if (this.isDisposed) {
-      throw new AssertionError('Cannot use disposed wallet account')
+    if (this.disposed) {
+      throw new DisposalError('The wallet account has been disposed.')
     }
   }
 

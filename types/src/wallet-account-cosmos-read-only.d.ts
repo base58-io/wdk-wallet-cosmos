@@ -56,12 +56,12 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      *
      * @type {boolean}
      */
-    get isDisposed(): boolean;
+    get disposed(): boolean;
     /**
      * Throws if this account has been disposed.
      *
      * @protected
-     * @throws {AssertionError} If the account has been disposed.
+     * @throws {DisposalError} If the account has been disposed.
      */
     protected _assertNotDisposed(): void;
     /**

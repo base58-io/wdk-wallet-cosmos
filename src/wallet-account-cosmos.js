@@ -3,7 +3,7 @@
 import { fromBase64, toBase64 } from '@cosmjs/encoding'
 import { makeSignDoc as makeDirectSignDoc } from '@cosmjs/proto-signing'
 import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
-import { InvalidSignerError, ValueError } from '@tetherto/wdk-wallet'
+import { ValueError } from '@tetherto/wdk-wallet'
 import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import { resolveChainConfig } from './chain-config-resolver.js'
 import SeedSignerCosmos from './signers/seed-signer-cosmos.js'
@@ -671,33 +671,13 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   }
 
   /**
-   * The derivation path's index of this account.
+   * The derivation path of this account (see BIP-44), or null if the signer is
+   * not bound to a derivation position.
    *
-   * @type {number}
-   */
-  get index() {
-    const index = this._signer.index
-    if (index === undefined) {
-      throw new InvalidSignerError(
-        'The Cosmos signer does not have a derivation index.'
-      )
-    }
-    return index
-  }
-
-  /**
-   * The derivation path of this account (see BIP-44).
-   *
-   * @type {string}
+   * @type {string | null}
    */
   get path() {
-    const path = this._signer.path
-    if (path === undefined) {
-      throw new InvalidSignerError(
-        'The Cosmos signer does not have a derivation path.'
-      )
-    }
-    return path
+    return this._signer.path
   }
 
   /**
@@ -705,7 +685,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
    *
    * @type {boolean}
    */
-  get isDisposed() {
+  get disposed() {
     return this._disposed
   }
 

@@ -20,10 +20,8 @@ export type ResolvedChainConfig = import('../chain-config-resolver.js').Resolved
 export declare class ISignerCosmos extends ISigner {
     /** @type {boolean} */
     get isDerivable(): boolean;
-    /** @type {number | undefined} */
-    get index(): number | undefined;
-    /** @type {string | undefined} */
-    get path(): string | undefined;
+    /** @type {string | null} */
+    get path(): string | null;
     /** @type {KeyPair} */
     get keyPair(): KeyPair;
     /**
@@ -94,8 +92,8 @@ export default class SeedSignerCosmos extends ISignerCosmos {
     });
     /** @type {boolean} */
     get isDerivable(): boolean;
-    /** @type {number | undefined} */
-    get index(): number | undefined;
+    /** @type {boolean} */
+    get disposed(): boolean;
     /** @type {string} */
     get path(): string;
     /** @type {KeyPair} */

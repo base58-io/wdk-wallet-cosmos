@@ -2,7 +2,7 @@
 
 import WalletManager, {
   AssertionError,
-  InvalidSignerError,
+  DisposalError,
   ProviderRequiredError,
 } from '@tetherto/wdk-wallet'
 import WalletAccountCosmos from './wallet-account-cosmos.js'
@@ -16,6 +16,7 @@ import {
 import SeedSignerCosmos from './signers/seed-signer-cosmos.js'
 
 /** @typedef {import('@tetherto/wdk-wallet').FeeRates} FeeRates */
+/** @typedef {import('@tetherto/wdk-wallet').InvalidSignerError} InvalidSignerError */
 /** @typedef {import('@tetherto/wdk-wallet').NoSuchElementError} NoSuchElementError */
 /** @typedef {import('@tetherto/wdk-wallet').UnsupportedOperationError} UnsupportedOperationError */
 /** @typedef {import('./signers/seed-signer-cosmos.js').ISignerCosmos} ISignerCosmos */
@@ -25,28 +26,32 @@ import SeedSignerCosmos from './signers/seed-signer-cosmos.js'
  * @typedef {Object.<string, WalletAccountCosmos>} CosmosAccountsMap
  */
 
+/** @extends {WalletManager<ISignerCosmos>} */
 export default class WalletManagerCosmos extends WalletManager {
   /**
    * Creates a new wallet manager for Cosmos blockchains.
    *
-   * Accepts a BIP-39 seed for backwards compatibility or a derivable Cosmos signer.
+   * Accepts a BIP-39 seed phrase, raw seed bytes, or a derivable Cosmos signer.
    *
    * @param {string | Uint8Array | ISignerCosmos} seedOrSigner - The seed or default Cosmos signer.
    * @param {CosmosWalletConfig} [config] - The configuration object.
+   * @throws {InvalidSignerError} If the given signer doesn't support account derivation.
    */
   constructor(seedOrSigner, config = {}) {
-    const signer =
+    const ownedSigner =
       typeof seedOrSigner === 'string' || seedOrSigner instanceof Uint8Array
         ? new SeedSignerCosmos(seedOrSigner, config)
-        : /** @type {ISignerCosmos} */ (seedOrSigner)
+        : undefined
 
-    if (!signer || !signer.isDerivable) {
-      throw new InvalidSignerError(
-        'The default Cosmos signer must support account derivation.'
-      )
-    }
+    super(ownedSigner ?? /** @type {ISignerCosmos} */ (seedOrSigner), config)
 
-    super(signer, config)
+    /**
+     * The default signer created from the seed, owned and disposed by this manager.
+     *
+     * @private
+     * @type {SeedSignerCosmos | undefined}
+     */
+    this._ownedSigner = ownedSigner
 
     /**
      * The Cosmos wallet configuration.
@@ -65,14 +70,6 @@ export default class WalletManagerCosmos extends WalletManager {
      * @type {CosmosAccountsMap}
      */
     this._accounts = {}
-
-    /**
-     * Whether this manager has been disposed.
-     *
-     * @protected
-     * @type {boolean}
-     */
-    this._disposed = false
   }
 
   /**
@@ -89,11 +86,11 @@ export default class WalletManagerCosmos extends WalletManager {
    * Throws an error if this manager has been disposed.
    *
    * @protected
-   * @throws {AssertionError} If the manager has been disposed.
+   * @throws {DisposalError} If the manager has been disposed.
    */
   _assertNotDisposed() {
-    if (this._disposed) {
-      throw new AssertionError('Cannot use disposed wallet manager')
+    if (this.disposed) {
+      throw new DisposalError('The wallet manager has been disposed.')
     }
   }
 
@@ -252,32 +249,23 @@ export default class WalletManagerCosmos extends WalletManager {
   }
 
   /**
-   * Whether this manager has been disposed.
-   *
-   * @type {boolean}
-   */
-  get isDisposed() {
-    return this._disposed
-  }
-
-  /**
-   * Disposes the wallet manager and all its accounts, securely erasing all sensitive data from memory.
-   * After calling this method, the manager can no longer be used.
+   * Disposes all the wallet accounts, securely erasing their sensitive data from memory.
+   * After calling this method, the manager can no longer be used. Only the signer the manager
+   * created from a seed is disposed; given signers remain the responsibility of whoever created them.
    */
   dispose() {
-    if (this._disposed) {
+    if (this.disposed) {
       return
     }
 
     // Dispose every account, including accounts backed by signers that do not
     // expose private keys. The base implementation only disposes local-key accounts.
     for (const account of Object.values(this._accounts)) {
-      account?.dispose()
+      account.dispose()
     }
     this._accounts = {}
+    this._ownedSigner?.dispose()
 
-    // The base implementation disposes the default and named signers.
     super.dispose()
-    this._disposed = true
   }
 }

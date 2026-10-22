@@ -1,12 +1,14 @@
 import WalletManager from '@tetherto/wdk-wallet';
 import WalletAccountCosmos from './wallet-account-cosmos.js';
 export type FeeRates = import('@tetherto/wdk-wallet').FeeRates;
+export type InvalidSignerError = import('@tetherto/wdk-wallet').InvalidSignerError;
 export type NoSuchElementError = import('@tetherto/wdk-wallet').NoSuchElementError;
 export type UnsupportedOperationError = import('@tetherto/wdk-wallet').UnsupportedOperationError;
 export type ISignerCosmos = import('./signers/seed-signer-cosmos.js').ISignerCosmos;
 export type CosmosWalletConfig = import('./wallet-account-cosmos.js').CosmosWalletConfig;
 export type CosmosAccountsMap = Object<string, WalletAccountCosmos>;
 /** @typedef {import('@tetherto/wdk-wallet').FeeRates} FeeRates */
+/** @typedef {import('@tetherto/wdk-wallet').InvalidSignerError} InvalidSignerError */
 /** @typedef {import('@tetherto/wdk-wallet').NoSuchElementError} NoSuchElementError */
 /** @typedef {import('@tetherto/wdk-wallet').UnsupportedOperationError} UnsupportedOperationError */
 /** @typedef {import('./signers/seed-signer-cosmos.js').ISignerCosmos} ISignerCosmos */
@@ -14,7 +16,15 @@ export type CosmosAccountsMap = Object<string, WalletAccountCosmos>;
 /**
  * @typedef {Object.<string, WalletAccountCosmos>} CosmosAccountsMap
  */
-export default class WalletManagerCosmos extends WalletManager {
+/** @extends {WalletManager<ISignerCosmos>} */
+export default class WalletManagerCosmos extends WalletManager<ISignerCosmos> {
+    /**
+     * The default signer created from the seed, owned and disposed by this manager.
+     *
+     * @private
+     * @type {SeedSignerCosmos | undefined}
+     */
+    _ownedSigner;
     /**
      * The Cosmos wallet configuration.
      *
@@ -32,19 +42,13 @@ export default class WalletManagerCosmos extends WalletManager {
      */
     _accounts: CosmosAccountsMap;
     /**
-     * Whether this manager has been disposed.
-     *
-     * @protected
-     * @type {boolean}
-     */
-    _disposed: boolean;
-    /**
      * Creates a new wallet manager for Cosmos blockchains.
      *
-     * Accepts a BIP-39 seed for backwards compatibility or a derivable Cosmos signer.
+     * Accepts a BIP-39 seed phrase, raw seed bytes, or a derivable Cosmos signer.
      *
      * @param {string | Uint8Array | ISignerCosmos} seedOrSigner - The seed or default Cosmos signer.
      * @param {CosmosWalletConfig} [config] - The configuration object.
+     * @throws {InvalidSignerError} If the given signer doesn't support account derivation.
      */
     constructor(seedOrSigner: string | Uint8Array | ISignerCosmos, config?: CosmosWalletConfig);
     /**
@@ -58,7 +62,7 @@ export default class WalletManagerCosmos extends WalletManager {
      * Throws an error if this manager has been disposed.
      *
      * @protected
-     * @throws {AssertionError} If the manager has been disposed.
+     * @throws {DisposalError} If the manager has been disposed.
      */
     protected _assertNotDisposed(): void;
     getAccount(index?: number, options?: {
@@ -87,14 +91,9 @@ export default class WalletManagerCosmos extends WalletManager {
      */
     getFeeRates(): Promise<FeeRates>;
     /**
-     * Whether this manager has been disposed.
-     *
-     * @type {boolean}
-     */
-    get isDisposed(): boolean;
-    /**
-     * Disposes the wallet manager and all its accounts, securely erasing all sensitive data from memory.
-     * After calling this method, the manager can no longer be used.
+     * Disposes all the wallet accounts, securely erasing their sensitive data from memory.
+     * After calling this method, the manager can no longer be used. Only the signer the manager
+     * created from a seed is disposed; given signers remain the responsibility of whoever created them.
      */
     dispose(): void;
 }

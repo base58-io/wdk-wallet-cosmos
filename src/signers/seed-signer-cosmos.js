@@ -10,6 +10,7 @@ import { toBase64 } from '@cosmjs/encoding'
 import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
 import {
   AssertionError,
+  DisposalError,
   ISigner,
   NotImplementedError,
   UnsupportedOperationError,
@@ -74,12 +75,7 @@ export class ISignerCosmos extends ISigner {
     throw new NotImplementedError('isDerivable')
   }
 
-  /** @type {number | undefined} */
-  get index() {
-    throw new NotImplementedError('index')
-  }
-
-  /** @type {string | undefined} */
+  /** @type {string | null} */
   get path() {
     throw new NotImplementedError('path')
   }
@@ -196,10 +192,9 @@ export default class SeedSignerCosmos extends ISignerCosmos {
     return Boolean(this._seed && !this._seed.isDisposed)
   }
 
-  /** @type {number | undefined} */
-  get index() {
-    const lastPathPart = this._path.split('/').pop()
-    return lastPathPart === undefined ? undefined : parseInt(lastPathPart, 10)
+  /** @type {boolean} */
+  get disposed() {
+    return this._disposed
   }
 
   /** @type {string} */
@@ -336,7 +331,7 @@ export default class SeedSignerCosmos extends ISignerCosmos {
   /** @private */
   _assertNotDisposed() {
     if (this._disposed) {
-      throw new AssertionError('Cannot use disposed Cosmos signer.')
+      throw new DisposalError('The signer has been disposed.')
     }
   }
 

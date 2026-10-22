@@ -229,23 +229,18 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      */
     toReadOnlyAccount(): Promise<WalletAccountCosmosReadOnly>;
     /**
-     * The derivation path's index of this account.
+     * The derivation path of this account (see BIP-44), or null if the signer is
+     * not bound to a derivation position.
      *
-     * @type {number}
+     * @type {string | null}
      */
-    get index(): number;
-    /**
-     * The derivation path of this account (see BIP-44).
-     *
-     * @type {string}
-     */
-    get path(): string;
+    get path(): string | null;
     /**
      * Whether this account has been disposed.
      *
      * @type {boolean}
      */
-    get isDisposed(): boolean;
+    get disposed(): boolean;
     /**
      * Disposes the wallet account, securely erasing all sensitive data from memory.
      * After calling this method, the account can no longer be used.
