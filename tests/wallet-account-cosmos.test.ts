@@ -13,12 +13,14 @@ import {
   type MockInstance,
 } from 'vitest'
 import WalletManagerCosmos, {
+  SeedSignerCosmos,
   WalletAccountCosmos,
   WalletAccountCosmosReadOnly,
 } from '../index.js'
 import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
 import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
 import {
+  DisposalError,
   MaximumFeeExceededError,
   NoSuchElementError,
   ProviderRequiredError,
@@ -175,21 +177,13 @@ describe('WalletAccountCosmos', () => {
     })
   })
 
-  describe('index', () => {
-    it('should return the derivation path index', async () => {
-      const account0 = await aliceWallet.getAccount(0)
-      const account5 = await aliceWallet.getAccount(5)
-
-      expect(account0.index).toBe(0)
-      expect(account5.index).toBe(5)
-    })
-  })
-
   describe('path', () => {
     it('should return the full derivation path', async () => {
       const account0 = await aliceWallet.getAccount(0)
+      const account5 = await aliceWallet.getAccount(5)
 
       expect(account0.path).toBe("m/44'/118'/0'/0/0")
+      expect(account5.path).toBe("m/44'/118'/0'/0/5")
     })
   })
 
@@ -581,7 +575,7 @@ describe('WalletAccountCosmos', () => {
 
       wallet.dispose()
 
-      expect(readOnlyAccount.isDisposed).toBe(false)
+      expect(readOnlyAccount.disposed).toBe(false)
       expect(await readOnlyAccount.getAddress()).toBe(ALICE_ADDRESS)
     })
   })
@@ -657,11 +651,11 @@ describe('WalletAccountCosmos', () => {
         {}
       )
 
-      expect(testAccount.isDisposed).toBe(false)
+      expect(testAccount.disposed).toBe(false)
 
       testAccount.dispose()
 
-      expect(testAccount.isDisposed).toBe(true)
+      expect(testAccount.disposed).toBe(true)
     })
 
     it('should throw when trying to use a disposed account', async () => {
@@ -672,9 +666,27 @@ describe('WalletAccountCosmos', () => {
       )
       testAccount.dispose()
 
-      await expect(testAccount.getAddress()).rejects.toThrow(
-        'Cannot use disposed wallet account'
+      await expect(testAccount.getAddress()).rejects.toThrow(DisposalError)
+    })
+
+    it('should dispose only signers it owns', async () => {
+      const ownedAccount = await WalletAccountCosmos.create(
+        ALICE_MNEMONIC,
+        "0'/0/0",
+        {}
       )
+      const ownedSigner = ownedAccount['_signer']
+      const signer = new SeedSignerCosmos(ALICE_MNEMONIC)
+      const account = await WalletAccountCosmos.fromSigner(signer)
+
+      ownedAccount.dispose()
+      account.dispose()
+
+      expect(ownedSigner.disposed).toBe(true)
+      expect(account.disposed).toBe(true)
+      expect(signer.disposed).toBe(false)
+
+      signer.dispose()
     })
 
     it('should be idempotent (calling dispose multiple times is safe)', async () => {
@@ -688,7 +700,7 @@ describe('WalletAccountCosmos', () => {
       testAccount.dispose()
       testAccount.dispose()
 
-      expect(testAccount.isDisposed).toBe(true)
+      expect(testAccount.disposed).toBe(true)
     })
   })
 })

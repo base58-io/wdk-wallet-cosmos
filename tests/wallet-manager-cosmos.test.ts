@@ -5,6 +5,7 @@ import WalletManagerCosmos, {
   WalletAccountCosmos,
 } from '../index.js'
 import {
+  DisposalError,
   InvalidSignerError,
   ProviderRequiredError,
   UnsupportedOperationError,
@@ -52,7 +53,7 @@ describe('WalletManagerCosmos', () => {
       const address = await account.getAddress()
 
       expect(testWallet).toBeInstanceOf(WalletManagerCosmos)
-      expect(testWallet.isDisposed).toBe(false)
+      expect(testWallet.disposed).toBe(false)
       expect(address).toBe(ALICE_ADDRESS)
 
       testWallet.dispose()
@@ -160,6 +161,26 @@ describe('WalletManagerCosmos', () => {
 
       expect(await account.getAddress()).toBe(ALICE_ADDRESS_INDEX_1)
       expect(await wallet.getAccount('account')).toBe(account)
+    })
+
+    it('should wrap a derivable named signer at its own path without deriving or disposing it', async () => {
+      const signer = new SeedSignerCosmos(ALICE_MNEMONIC, {
+        addressPrefix: 'wdk',
+      })
+      wallet.addSigner('seed', signer)
+
+      const account = await wallet.getAccount('seed')
+
+      expect(await account.getAddress()).toBe(await signer.getAddress())
+      expect(account.path).toBe(signer.path)
+
+      account.dispose()
+      wallet.dispose()
+
+      expect(signer.disposed).toBe(false)
+      expect(signer.isDerivable).toBe(true)
+
+      signer.dispose()
     })
 
     it('should throw if the index is a negative number', async () => {
@@ -285,23 +306,21 @@ describe('WalletManagerCosmos', () => {
     it('should mark the wallet as disposed', () => {
       const testWallet = new WalletManagerCosmos(ALICE_MNEMONIC, {})
 
-      expect(testWallet.isDisposed).toBe(false)
+      expect(testWallet.disposed).toBe(false)
 
       testWallet.dispose()
 
-      expect(testWallet.isDisposed).toBe(true)
+      expect(testWallet.disposed).toBe(true)
     })
 
     it('should throw when trying to use a disposed wallet', async () => {
       const testWallet = new WalletManagerCosmos(ALICE_MNEMONIC, {})
       testWallet.dispose()
 
-      await expect(testWallet.getAccount(0)).rejects.toThrow(
-        'Cannot use disposed wallet manager'
-      )
+      await expect(testWallet.getAccount(0)).rejects.toThrow(DisposalError)
     })
 
-    it('should dispose registered signers', () => {
+    it('should dispose only the signer it created from the seed', () => {
       const signer = new SeedSignerCosmos(ALICE_MNEMONIC, {
         addressPrefix: 'wdk',
       })
@@ -310,7 +329,10 @@ describe('WalletManagerCosmos', () => {
 
       testWallet.dispose()
 
-      expect(signer.isDerivable).toBe(false)
+      expect(testWallet.getSigner().disposed).toBe(true)
+      expect(signer.disposed).toBe(false)
+
+      signer.dispose()
     })
 
     it('should be idempotent (calling dispose multiple times is safe)', () => {
@@ -320,7 +342,7 @@ describe('WalletManagerCosmos', () => {
       testWallet.dispose()
       testWallet.dispose()
 
-      expect(testWallet.isDisposed).toBe(true)
+      expect(testWallet.disposed).toBe(true)
     })
   })
 })
