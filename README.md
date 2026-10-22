@@ -179,20 +179,35 @@ console.log('Normal fee rate:', feeRates.normal)
 console.log('Fast fee rate:', feeRates.fast)
 ```
 
-Fee estimation uses a deterministic fallback chain shared by `transfer`,
-`quoteTransfer`, `sendTransaction`, and `quoteSendTransaction`:
+A fee is a gas price times a gas limit:
+
+```text
+fee = ceil(gasPrice * gasLimit)
+```
+
+The gas price comes from the first of:
 
 1. `gasPriceStep` from chain-registry (`average` / `high`)
 2. explicit `gasPrice` from config (for example `0.025uatom`)
 3. default Cosmos-compatible gas price tiers (`0.01 / 0.025 / 0.04`)
 
-Estimated fee is calculated as:
+`WalletAccountCosmos` sets the gas limit by simulating the exact messages it
+will sign (`transfer`, `quoteTransfer`, `signTransaction`, and unsigned
+`sendTransaction` / `quoteSendTransaction`). The simulated transaction carries a
+fee, so the gas for deducting it is counted:
 
 ```text
-ceil(gasPriceAmount * gasLimit)
+gasLimit = ceil(simulatedGasUsed * gasAdjustment)   // gasAdjustment defaults to 1.3
 ```
 
-with a default transfer gas limit of `200000`.
+A failed simulation throws; there is no fixed-limit fallback. Transport failures
+fail over across `rpcEndpoints` and end in a `ProviderError`. A simulation the
+chain rejects (insufficient funds, an invalid message) throws immediately with
+the chain's error code and log.
+
+`WalletAccountCosmosReadOnly` cannot simulate (it has no public key), so its
+quotes use a fixed gas limit of `200000`. `getFeeRates` uses the same fixed
+limit.
 
 ### Memory Management
 
@@ -240,6 +255,7 @@ new WalletManagerCosmos(seedOrSigner, config)
   - `nativeDenom` (string, optional): Native token denomination (overrides registry, default: "uatom")
   - `coinType` (number, optional): BIP-44 coin type (overrides registry, default: 118)
   - `gasPrice` (string, optional): Gas price with denom (e.g. "0.025uatom")
+  - `gasAdjustment` (number, optional): Multiplier applied to simulated gas usage to set the gas limit (default: 1.3)
   - `transferMaxFee` (number | bigint, optional): Maximum fee amount for transfer operations
   - `transactionMaxFee` (number | bigint, optional): Maximum fee amount for transaction operations
 
@@ -324,6 +340,7 @@ const signerAccount = await WalletAccountCosmos.fromSigner(signer, config)
   - `nativeDenom` (string, optional): Native token denomination
   - `coinType` (number, optional): BIP-44 coin type
   - `gasPrice` (string, optional): Gas price with denom
+  - `gasAdjustment` (number, optional): Multiplier applied to simulated gas usage (default: 1.3)
   - `transferMaxFee` (number | bigint, optional): Maximum transfer fee amount
   - `transactionMaxFee` (number | bigint, optional): Maximum transaction fee amount
 
@@ -367,7 +384,9 @@ Transfers tokens to another address.
 
 ##### Fee estimation behavior
 
-- Fee is derived from gas price metadata and default gas limit (`200000`).
+- The gas limit is the simulated gas usage times `gasAdjustment`; see [Fee Management](#fee-management).
+- A failed simulation throws: no fee is guessed and nothing is signed or broadcast.
+- A transaction that is included in a block but fails throws instead of returning its hash: `TransferError` or `TransactionError` for insufficient funds, a plain `Error` with the chain's code and log otherwise.
 - `transferMaxFee` applies only to `transfer` and `quoteTransfer`.
 - `transactionMaxFee` applies to signing, sending, and quoting transactions.
 - Operations throw before signing or broadcasting when their fee exceeds the configured limit.
@@ -452,6 +471,10 @@ Every read path of `WalletAccountCosmos` is available: `getAddress`,
 `getBalance`, `getTokenBalance`, `getTokenBalances`, `quoteTransfer`,
 `quoteSendTransaction`, `getTransaction`, `waitForTransaction`,
 `getTransactionReceipt` and `verify`.
+
+`quoteTransfer` and unsigned `quoteSendTransaction` use a fixed gas limit of
+`200000`: simulation needs the sender's public key, which a watch-only account
+does not have.
 
 `verify` works without a private key: an ADR-36 `StdSignature` carries the public
 key it was made with, which must both derive the account's address and validate
