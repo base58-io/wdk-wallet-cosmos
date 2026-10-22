@@ -6,10 +6,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import WalletManagerCosmos, { WalletAccountCosmos } from '../index.js'
-import {
-  DEFAULT_TRANSFER_GAS_LIMIT,
-  calculateFeeAmountFromGasPrice,
-} from '../src/gas-fee-utils.js'
+import { calculateFeeAmountFromGasPrice } from '../src/gas-fee-utils.js'
 import {
   ALICE_ADDRESS,
   ALICE_MNEMONIC,
@@ -118,23 +115,29 @@ describe('WalletAccountCosmos (chain-backed)', () => {
       expect(aliceBalanceAfter).toBe(aliceBalanceBefore + BigInt(1000))
     })
 
-    it('should deduct correct fee from sender balance', async () => {
+    it('should sign at the simulated gas limit and deduct the returned fee', async () => {
       const balanceBefore = await bobAccount.getBalance('stake')
 
-      await bobAccount.transfer({
+      const transfer = await bobAccount.transfer({
         token: 'token',
         recipient: ALICE_ADDRESS,
         amount: 1000,
       })
 
       const balanceAfter = await bobAccount.getBalance('stake')
-      const expectedFee = calculateFeeAmountFromGasPrice(
-        DEFAULT_TEST_GAS_PRICE_AMOUNT,
-        DEFAULT_TRANSFER_GAS_LIMIT
-      )
+      const receipt = await bobAccount.getTransaction(transfer.hash)
+      const { gasUsed, gasWanted } = receipt.transaction
 
-      expect(expectedFee).toBeDefined()
-      expect(balanceBefore - balanceAfter).toBe(expectedFee)
+      expect(receipt.success).toBe(true)
+      expect(receipt.fee).toBe(transfer.fee)
+      expect(transfer.fee).toBe(
+        calculateFeeAmountFromGasPrice(
+          DEFAULT_TEST_GAS_PRICE_AMOUNT,
+          Number(gasWanted)
+        )
+      )
+      expect(gasUsed).toBeLessThanOrEqual(gasWanted)
+      expect(balanceBefore - balanceAfter).toBe(transfer.fee)
     })
 
     it('should transfer native stake from wdkdev (wdk) to wdkdev2 (wdk2) via IBC', async () => {
@@ -174,6 +177,12 @@ describe('WalletAccountCosmos (chain-backed)', () => {
         expect(transferResult.hash).toBeTypeOf('string')
         expect(transferResult.hash.length).toBeGreaterThan(0)
         expect(transferResult.fee).toBeGreaterThan(BigInt(0))
+
+        const receipt = await chain1AliceAccount.getTransaction(
+          transferResult.hash
+        )
+        expect(receipt.success).toBe(true)
+        expect(receipt.fee).toBe(transferResult.fee)
 
         const bobIbcBalanceAfter =
           await chain2BobAccount.getBalance(destinationIbcDenom)

@@ -10,23 +10,38 @@ import {
   beforeEach,
   afterEach,
   vi,
-  type MockInstance,
+  type Mock,
 } from 'vitest'
 import WalletManagerCosmos, {
   SeedSignerCosmos,
   WalletAccountCosmos,
   WalletAccountCosmosReadOnly,
 } from '../index.js'
-import { DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
-import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
+import {
+  DirectSecp256k1Wallet,
+  Registry,
+  type EncodeObject,
+} from '@cosmjs/proto-signing'
+import {
+  SigningStargateClient,
+  StargateClient,
+  defaultRegistryTypes,
+} from '@cosmjs/stargate'
+import { connectComet } from '@cosmjs/tendermint-rpc'
+import { ServiceClientImpl } from 'cosmjs-types/cosmos/tx/v1beta1/service'
 import {
   DisposalError,
   MaximumFeeExceededError,
   NoSuchElementError,
+  ProviderError,
   ProviderRequiredError,
+  TransferError,
+  TransferErrorReason,
+  ValueError,
 } from '@tetherto/wdk-wallet'
 import {
   AuthInfo,
+  Tx,
   TxRaw,
 } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import {
@@ -45,8 +60,47 @@ import {
   INVALID_MNEMONIC,
 } from './fixtures.js'
 
+vi.mock('@cosmjs/tendermint-rpc', async importOriginal => ({
+  ...(await importOriginal<typeof import('@cosmjs/tendermint-rpc')>()),
+  connectComet: vi.fn(),
+}))
+
 // A caller-supplied memo, expected to replace the default on transfers.
 const CUSTOM_MEMO = 'order-12345'
+
+// 77,777 gas used × the default 1.3 adjustment = 101,110.1, rounded up; the fee
+// is that limit × the 0.025stake fixture gas price, rounded up.
+const SIMULATED_GAS_USED = 77_777
+const SIMULATED_GAS_LIMIT = 101_111
+const SIMULATED_FEE = BigInt(2528)
+
+const REGISTRY = new Registry(defaultRegistryTypes)
+
+/**
+ * A `simulate` stub reporting `gasUsed`. {@link withStubbedSigningClient}
+ * routes the chain's Simulate query to it, with the `SimulateRequest`.
+ */
+function simulating(gasUsed = SIMULATED_GAS_USED) {
+  return vi.fn().mockResolvedValue(gasUsed)
+}
+
+/**
+ * Asserts that `simulate` received exactly `messages` and `memo`, with a
+ * non-zero fee attached.
+ */
+function expectSimulated(
+  simulate: Mock,
+  messages: EncodeObject[],
+  memo: string
+) {
+  const tx = Tx.decode(simulate.mock.calls[0][0].txBytes)
+
+  expect(tx.body?.messages).toEqual(
+    messages.map(message => REGISTRY.encodeAsAny(message))
+  )
+  expect(tx.body?.memo).toBe(memo)
+  expect(tx.authInfo?.fee?.amount).toEqual([{ denom: 'stake', amount: '1' }])
+}
 
 function createSignedTransaction(fee: string): TxRaw {
   return TxRaw.fromPartial({
@@ -101,20 +155,37 @@ async function withStubbedClient<T>(
 
 /**
  * Runs `operation` with `SigningStargateClient.connectWithSigner` stubbed to
- * return `client`, so signing paths can be inspected without a chain.
+ * return `client`, so signing paths can be inspected without a chain. The
+ * simulation's Comet connection and sequence lookup are stubbed too, and the
+ * chain's Simulate query resolves with the gas used `client.simulate` reports.
  */
 async function withStubbedSigningClient<T>(
-  client: Record<string, unknown>,
-  operation: (connectWithSigner: MockInstance) => Promise<T>
+  { simulate, ...client }: Record<string, unknown> & { simulate?: Mock },
+  operation: () => Promise<T>
 ): Promise<T> {
   const connectWithSigner = vi
     .spyOn(SigningStargateClient, 'connectWithSigner')
     .mockResolvedValue(client as never)
+  vi.mocked(connectComet).mockResolvedValue({} as never)
+  const createClient = vi.spyOn(StargateClient, 'create').mockReturnValue({
+    getSequence: vi.fn().mockResolvedValue({ accountNumber: 0, sequence: 0 }),
+  } as never)
+  const simulateQuery = vi
+    .spyOn(ServiceClientImpl.prototype, 'Simulate')
+    .mockImplementation(async request => ({
+      gasInfo: {
+        gasWanted: BigInt(0),
+        gasUsed: BigInt(await simulate?.(request)),
+      },
+    }))
 
   try {
-    return await operation(connectWithSigner)
+    return await operation()
   } finally {
     connectWithSigner.mockRestore()
+    vi.mocked(connectComet).mockReset()
+    createClient.mockRestore()
+    simulateQuery.mockRestore()
   }
 }
 
@@ -189,14 +260,14 @@ describe('WalletAccountCosmos', () => {
 
   describe('keyPair', () => {
     it("should return the account's key pair", () => {
-      const keyPair = aliceAccount.keyPair
+      const keyPair = aliceAccount.keyPair!
 
       expect(keyPair.privateKey).toBeDefined()
       expect(keyPair.publicKey).toBeDefined()
     })
 
     it('account should have same public key when recreated using private key', async () => {
-      const keyPair = aliceAccount.keyPair
+      const keyPair = aliceAccount.keyPair!
 
       const newWallet = await DirectSecp256k1Wallet.fromKey(
         keyPair.privateKey!,
@@ -207,6 +278,38 @@ describe('WalletAccountCosmos', () => {
       const newAddress = newAccount[0].address
 
       expect(newAddress).toBe(ALICE_ADDRESS)
+    })
+
+    it('should read the public key from the signer when it exposes no key pair', async () => {
+      const wallet = await DirectSecp256k1Wallet.fromKey(
+        aliceAccount.keyPair!.privateKey!,
+        'wdk'
+      )
+      const signer = {
+        keyPair: null,
+        getAddress: async () => ALICE_ADDRESS,
+        getAccounts: () => wallet.getAccounts(),
+      }
+      const account = await WalletAccountCosmos.fromSigner(
+        signer as never,
+        IBC_CHAIN_1_CONFIG
+      )
+
+      expect(await account.getPublicKey()).toBe(
+        await aliceAccount.getPublicKey()
+      )
+
+      const quote = await withStubbedSigningClient(
+        { simulate: simulating() },
+        () =>
+          account.quoteTransfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 1000,
+          })
+      )
+
+      expect(quote.fee).toBe(SIMULATED_FEE)
     })
   })
 
@@ -293,20 +396,75 @@ describe('WalletAccountCosmos', () => {
   })
 
   describe('quoteTransfer', () => {
-    it('should return estimated fee', async () => {
-      const quote = await aliceAccount.quoteTransfer({
+    it('should quote the fee at the simulated gas limit', async () => {
+      const simulate = simulating()
+
+      const quote = await withStubbedSigningClient({ simulate }, () =>
+        aliceAccount.quoteTransfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS,
+          amount: 1000,
+        })
+      )
+
+      expect(quote.fee).toBe(SIMULATED_FEE)
+      expect(simulate).toHaveBeenCalledOnce()
+    })
+
+    it('should quote a read-only account at the fixed gas limit without simulating', async () => {
+      const readOnlyAccount = WalletAccountCosmosReadOnly.fromAddress(
+        ALICE_ADDRESS,
+        IBC_CHAIN_1_CONFIG
+      )
+
+      const quote = await readOnlyAccount.quoteTransfer({
         token: 'stake',
         recipient: BOB_ADDRESS,
         amount: 1000,
       })
 
-      const expectedFee = calculateFeeAmountFromGasPrice(
-        DEFAULT_TEST_GAS_PRICE_AMOUNT,
-        DEFAULT_TRANSFER_GAS_LIMIT
+      expect(quote.fee).toBe(
+        calculateFeeAmountFromGasPrice(
+          DEFAULT_TEST_GAS_PRICE_AMOUNT,
+          DEFAULT_TRANSFER_GAS_LIMIT
+        )
+      )
+      expect(connectComet).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('gasAdjustment', () => {
+    it('should scale the simulated gas by the configured adjustment', async () => {
+      const account = await WalletAccountCosmos.create(ALICE_MNEMONIC, "0'/0/0", {
+        ...IBC_CHAIN_1_CONFIG,
+        gasAdjustment: 2,
+      })
+
+      const quote = await withStubbedSigningClient(
+        { simulate: simulating(100_000) },
+        () =>
+          account.quoteTransfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 1000,
+          })
       )
 
-      expect(expectedFee).toBeDefined()
-      expect(quote.fee).toBe(expectedFee)
+      // 100,000 × 2 = 200,000 gas at 0.025stake.
+      expect(quote.fee).toBe(BigInt(5000))
+
+      account.dispose()
+    })
+
+    it('should reject a gasAdjustment that is not a positive finite number', () => {
+      for (const gasAdjustment of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() =>
+          WalletAccountCosmosReadOnly.fromAddress(ALICE_ADDRESS, {
+            ...IBC_CHAIN_1_CONFIG,
+            gasAdjustment,
+          })
+        ).toThrow(ValueError)
+      }
     })
   })
 
@@ -326,18 +484,39 @@ describe('WalletAccountCosmos', () => {
       })
       const account = await wallet.getAccount(0)
 
-      await expect(
-        account.quoteSendTransaction({
-          to: BOB_ADDRESS,
-          value: 1000,
-        })
-      ).rejects.toThrow('Exceeded maximum fee cost for transaction operation.')
+      await withStubbedSigningClient({ simulate: simulating() }, async () => {
+        await expect(
+          account.quoteSendTransaction({
+            to: BOB_ADDRESS,
+            value: 1000,
+          })
+        ).rejects.toThrow('Exceeded maximum fee cost for transaction operation.')
+      })
 
       wallet.dispose()
     })
 
+    it('should sign an unsigned transaction at the simulated gas limit', async () => {
+      const simulate = simulating()
+      const sign = vi.fn().mockResolvedValue(createSignedTransaction('0'))
+
+      await withStubbedSigningClient({ simulate, sign }, () =>
+        aliceAccount.signTransaction({ to: BOB_ADDRESS, value: 1000 })
+      )
+
+      const [, messages, fee, memo] = sign.mock.calls[0]
+
+      expectSimulated(simulate, messages, memo)
+      expect(messages[0].typeUrl).toBe('/cosmos.bank.v1beta1.MsgSend')
+      expect(fee).toEqual({
+        amount: [{ denom: 'stake', amount: SIMULATED_FEE.toString() }],
+        gas: String(SIMULATED_GAS_LIMIT),
+      })
+    })
+
     it('should broadcast a signed transaction', async () => {
       const broadcastTx = vi.fn().mockResolvedValue({
+        code: 0,
         transactionHash: 'SIGNED_TRANSACTION_HASH',
       })
 
@@ -350,6 +529,22 @@ describe('WalletAccountCosmos', () => {
         fee: BigInt(123),
       })
       expect(broadcastTx).toHaveBeenCalledOnce()
+    })
+
+    it('should throw when a broadcast transaction fails on chain', async () => {
+      const broadcastTx = vi.fn().mockResolvedValue({
+        code: 11,
+        transactionHash: 'SIGNED_TRANSACTION_HASH',
+        rawLog: 'out of gas in location: WritePerByte',
+      })
+
+      await expect(
+        withStubbedClient({ broadcastTx }, () =>
+          aliceAccount.sendTransaction(createSignedTransaction('123'))
+        )
+      ).rejects.toThrow(
+        'The transaction SIGNED_TRANSACTION_HASH failed on chain with code 11: out of gas in location: WritePerByte'
+      )
     })
 
     it('should enforce transactionMaxFee before broadcasting a signed transaction', async () => {
@@ -388,71 +583,219 @@ describe('WalletAccountCosmos', () => {
       accountWithoutRpc.dispose()
     })
 
-    it('should throw if fee exceeds transferMaxFee', async () => {
-      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
-        ...IBC_CHAIN_1_CONFIG,
-        transferMaxFee: 1, // Very low limit
-      })
-      const account = await wallet.getAccount(0)
+    it('should sign the simulated messages at the simulated gas limit', async () => {
+      const simulate = simulating()
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
 
-      await expect(
-        account.transfer({
+      const result = await withStubbedSigningClient(
+        { simulate, signAndBroadcast },
+        () =>
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 1000,
+          })
+      )
+
+      const [, messages, fee, memo] = signAndBroadcast.mock.calls[0]
+
+      expectSimulated(simulate, messages, memo)
+      expect(messages).toEqual([
+        {
+          typeUrl: '/cosmos.bank.v1beta1.MsgSend',
+          value: {
+            fromAddress: ALICE_ADDRESS,
+            toAddress: BOB_ADDRESS,
+            amount: [{ denom: 'stake', amount: '1000' }],
+          },
+        },
+      ])
+      expect(fee).toEqual({
+        amount: [{ denom: 'stake', amount: SIMULATED_FEE.toString() }],
+        gas: String(SIMULATED_GAS_LIMIT),
+      })
+      expect(result).toEqual({ hash: 'HASH', fee: SIMULATED_FEE })
+    })
+
+    it('should throw TransferError when the transfer fails on chain for insufficient funds', async () => {
+      const signAndBroadcast = vi.fn().mockResolvedValue({
+        code: 5,
+        transactionHash: 'HASH',
+        rawLog: 'spendable balance 10stake is smaller than 1000stake: insufficient funds',
+      })
+
+      const transfer = withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        () =>
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 1000,
+          })
+      )
+
+      await expect(transfer).rejects.toThrow(TransferError)
+      await expect(transfer).rejects.toMatchObject({
+        reason: TransferErrorReason.INSUFFICIENT_BALANCE,
+      })
+    })
+
+    it('should simulate the IBC MsgTransfer it signs', async () => {
+      const simulate = simulating()
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
+
+      await withStubbedSigningClient({ simulate, signAndBroadcast }, () =>
+        aliceAccount.transfer({
           token: 'stake',
-          recipient: BOB_ADDRESS,
+          recipient: BOB_ADDRESS_CHAIN_2,
           amount: 1000,
         })
-      ).rejects.toThrow('Exceeded maximum fee cost')
+      )
 
-      wallet.dispose()
+      const [, messages, , memo] = signAndBroadcast.mock.calls[0]
+
+      expectSimulated(simulate, messages, memo)
+      expect(messages[0].typeUrl).toBe(
+        '/ibc.applications.transfer.v1.MsgTransfer'
+      )
+    })
+
+    it('should enforce transferMaxFee against the simulated fee', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        ...IBC_CHAIN_1_CONFIG,
+        transferMaxFee: 2000,
+      })
+      const account = await wallet.getAccount(0)
+      const options = { token: 'stake', recipient: BOB_ADDRESS, amount: 1000 }
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
+
+      try {
+        // 50,000 gas used prices at 1,625stake, under the limit.
+        await withStubbedSigningClient(
+          { simulate: simulating(50_000), signAndBroadcast },
+          () => account.transfer(options)
+        )
+        expect(signAndBroadcast).toHaveBeenCalledOnce()
+
+        // 100,000 gas used prices at 3,250stake, over it.
+        await withStubbedSigningClient(
+          { simulate: simulating(100_000), signAndBroadcast },
+          async () => {
+            await expect(account.transfer(options)).rejects.toThrow(
+              MaximumFeeExceededError
+            )
+          }
+        )
+        expect(signAndBroadcast).toHaveBeenCalledOnce()
+      } finally {
+        wallet.dispose()
+      }
+    })
+
+    it('should throw a rejected simulation at once, without retrying or broadcasting', async () => {
+      const abciError = new Error(
+        'Query failed with (5): rpc error: code = Unknown desc = 1000stake is smaller than 99999999stake: insufficient funds'
+      )
+      const simulate = vi.fn().mockRejectedValue(abciError)
+      const signAndBroadcast = vi.fn()
+
+      await withStubbedSigningClient({ simulate, signAndBroadcast }, async () => {
+        await expect(
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 99_999_999,
+          })
+        ).rejects.toBe(abciError)
+      })
+
+      expect(simulate).toHaveBeenCalledOnce()
+      expect(signAndBroadcast).not.toHaveBeenCalled()
+    })
+
+    it('should throw ProviderError when every endpoint fails to simulate', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        ...IBC_CHAIN_1_CONFIG,
+        rpcEndpoints: ['http://rpc-1.invalid', 'http://rpc-2.invalid'],
+        retryCount: 0,
+      })
+      const account = await wallet.getAccount(0)
+      const simulate = vi.fn().mockRejectedValue(new Error('fetch failed'))
+
+      try {
+        await withStubbedSigningClient({ simulate }, async () => {
+          await expect(
+            account.quoteTransfer({
+              token: 'stake',
+              recipient: BOB_ADDRESS,
+              amount: 1000,
+            })
+          ).rejects.toThrow(ProviderError)
+        })
+
+        expect(simulate).toHaveBeenCalledTimes(2)
+      } finally {
+        wallet.dispose()
+      }
     })
 
     it('should pass a caller-supplied memo through the same-prefix branch', async () => {
-      const sendTokens = vi.fn().mockResolvedValue({ transactionHash: 'HASH' })
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
 
-      await withStubbedSigningClient({ sendTokens }, () =>
-        aliceAccount.transfer({
-          token: 'stake',
-          recipient: BOB_ADDRESS,
-          amount: 1000,
-          memo: CUSTOM_MEMO,
-        })
+      await withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        () =>
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 1000,
+            memo: CUSTOM_MEMO,
+          })
       )
 
-      expect(sendTokens).toHaveBeenCalledWith(
-        ALICE_ADDRESS,
-        BOB_ADDRESS,
-        [{ denom: 'stake', amount: '1000' }],
-        expect.anything(),
-        CUSTOM_MEMO
-      )
+      expect(signAndBroadcast.mock.calls[0][3]).toBe(CUSTOM_MEMO)
     })
 
     it('should default the memo when the same-prefix branch gets none', async () => {
-      const sendTokens = vi.fn().mockResolvedValue({ transactionHash: 'HASH' })
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
 
-      await withStubbedSigningClient({ sendTokens }, () =>
-        aliceAccount.transfer({
-          token: 'stake',
-          recipient: BOB_ADDRESS,
-          amount: 1000,
-        })
+      await withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        () =>
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS,
+            amount: 1000,
+          })
       )
 
-      expect(sendTokens.mock.calls[0][4]).toBe('Transfer via WDK')
+      expect(signAndBroadcast.mock.calls[0][3]).toBe('Transfer via WDK')
     })
 
     it('should pass a caller-supplied memo through the IBC branch', async () => {
       const signAndBroadcast = vi
         .fn()
-        .mockResolvedValue({ transactionHash: 'HASH' })
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
 
-      await withStubbedSigningClient({ signAndBroadcast }, () =>
-        aliceAccount.transfer({
-          token: 'stake',
-          recipient: BOB_ADDRESS_CHAIN_2,
-          amount: 1000,
-          memo: CUSTOM_MEMO,
-        })
+      await withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        () =>
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS_CHAIN_2,
+            amount: 1000,
+            memo: CUSTOM_MEMO,
+          })
       )
 
       const [, messages, , txMemo] = signAndBroadcast.mock.calls[0]
@@ -466,14 +809,16 @@ describe('WalletAccountCosmos', () => {
     it('should default the memo when the IBC branch gets none', async () => {
       const signAndBroadcast = vi
         .fn()
-        .mockResolvedValue({ transactionHash: 'HASH' })
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
 
-      await withStubbedSigningClient({ signAndBroadcast }, () =>
-        aliceAccount.transfer({
-          token: 'stake',
-          recipient: BOB_ADDRESS_CHAIN_2,
-          amount: 1000,
-        })
+      await withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        () =>
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: BOB_ADDRESS_CHAIN_2,
+            amount: 1000,
+          })
       )
 
       const [, messages, , txMemo] = signAndBroadcast.mock.calls[0]
@@ -593,33 +938,6 @@ describe('WalletAccountCosmos', () => {
       )
 
       accountWithoutRpc.dispose()
-    })
-
-    it('should throw MaximumFeeExceededError without broadcasting a transfer', async () => {
-      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
-        ...IBC_CHAIN_1_CONFIG,
-        transferMaxFee: 1,
-      })
-      const account = await wallet.getAccount(0)
-      const connectWithSigner = vi.spyOn(
-        SigningStargateClient,
-        'connectWithSigner'
-      )
-
-      try {
-        await expect(
-          account.transfer({
-            token: 'stake',
-            recipient: BOB_ADDRESS,
-            amount: 1000,
-          })
-        ).rejects.toThrow(MaximumFeeExceededError)
-
-        expect(connectWithSigner).not.toHaveBeenCalled()
-      } finally {
-        connectWithSigner.mockRestore()
-        wallet.dispose()
-      }
     })
 
     it('should throw MaximumFeeExceededError without broadcasting a transaction', async () => {

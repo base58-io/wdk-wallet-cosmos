@@ -101,7 +101,7 @@ describe('WalletAccountCosmos direct and amino signing', () => {
 
       expect(publicKey).toBeTypeOf('string')
       expect(fromBase64(publicKey)).toHaveLength(33)
-      expect(publicKey).toBe(toBase64(account.keyPair.publicKey))
+      expect(publicKey).toBe(toBase64(account.keyPair!.publicKey))
     })
   })
 

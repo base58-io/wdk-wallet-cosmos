@@ -71,6 +71,13 @@ describe('shouldThrow', () => {
       const error = new Error('invalid chain-id')
       expect(shouldThrow(error)).toBe(true)
     })
+
+    it('returns true for an ABCI query failure whose log reads like a network error', () => {
+      const error = new Error(
+        'Query failed with (18): rpc error: code = Unknown desc = packet timeout'
+      )
+      expect(shouldThrow(error)).toBe(true)
+    })
   })
 
   describe('network errors (retryable)', () => {
