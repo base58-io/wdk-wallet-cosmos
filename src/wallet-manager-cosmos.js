@@ -106,7 +106,12 @@ export default class WalletManagerCosmos extends WalletManager {
    */
 
   /**
-   * Returns the account associated with a named signer.
+   * Returns the account wrapping a named signer exactly as registered, without derivation.
+   *
+   * For a non-derivable signer that is its single account; for a derivable signer it is the
+   * account at the signer's own path. Use `getAccount(index, { signerName })` or
+   * `getAccountByPath(path, { signerName })` to derive from a named signer. Disposing the
+   * returned account leaves the registered signer untouched.
    *
    * @overload
    * @param {string} signerName - The registered signer name.
@@ -130,17 +135,7 @@ export default class WalletManagerCosmos extends WalletManager {
       const signer = /** @type {ISignerCosmos} */ (
         this.getSigner(indexOrSignerName)
       )
-      const accountSigner = signer.isDerivable
-        ? await signer.derive(
-            signer.path
-              ? signer.path.split('/').slice(-3).join('/')
-              : "0'/0/0"
-          )
-        : signer
-      const account = await WalletAccountCosmos.fromSigner(
-        accountSigner,
-        this._config
-      )
+      const account = await WalletAccountCosmos.fromSigner(signer, this._config)
       this._accounts[key] = account
       return account
     }
@@ -170,7 +165,8 @@ export default class WalletManagerCosmos extends WalletManager {
       const childSigner = await signer.derive(path)
       const account = await WalletAccountCosmos.fromSigner(
         childSigner,
-        this._config
+        this._config,
+        { shouldWipeSignerOnDisposal: true }
       )
       this._accounts[key] = account
     }

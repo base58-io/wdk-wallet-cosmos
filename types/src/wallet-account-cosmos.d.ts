@@ -96,6 +96,13 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      */
     _signer: ISignerCosmos;
     /**
+     * If true, disposes the signer on calls to the 'dispose' method.
+     *
+     * @protected
+     * @type {boolean}
+     */
+    _shouldWipeSignerOnDisposal: boolean;
+    /**
      * Whether this account has been disposed.
      *
      * @protected
@@ -107,8 +114,9 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      *
      * @param {ISignerCosmos} signer - The initialized Cosmos signer.
      * @param {ResolvedChainConfig} resolvedConfig - The resolved configuration object.
+     * @param {boolean} [shouldWipeSignerOnDisposal] - If true, the account owns the signer and disposes it in {@link dispose}.
      */
-    constructor(signer: ISignerCosmos, resolvedConfig: ResolvedChainConfig);
+    constructor(signer: ISignerCosmos, resolvedConfig: ResolvedChainConfig, shouldWipeSignerOnDisposal?: boolean);
     /**
      * Creates a new Cosmos wallet account.
      *
@@ -121,11 +129,17 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
     /**
      * Creates a wallet account from an initialized Cosmos signer.
      *
+     * The signer stays owned by the caller: disposing the account leaves it untouched,
+     * unless `shouldWipeSignerOnDisposal` hands its ownership to the account.
+     *
      * @param {ISignerCosmos} signer - The Cosmos signer.
      * @param {CosmosWalletConfig} [config] - The configuration object.
+     * @param {{ shouldWipeSignerOnDisposal?: boolean }} [options] - Ownership options.
      * @returns {Promise<WalletAccountCosmos>} The wallet account instance.
      */
-    static fromSigner(signer: ISignerCosmos, config?: CosmosWalletConfig): Promise<WalletAccountCosmos>;
+    static fromSigner(signer: ISignerCosmos, config?: CosmosWalletConfig, { shouldWipeSignerOnDisposal }?: {
+        shouldWipeSignerOnDisposal?: boolean;
+    }): Promise<WalletAccountCosmos>;
     /**
      * Returns the account's address.
      *
@@ -242,8 +256,8 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      */
     get disposed(): boolean;
     /**
-     * Disposes the wallet account, securely erasing all sensitive data from memory.
-     * After calling this method, the account can no longer be used.
+     * Disposes the wallet account. After calling this method, the account can no longer be used.
+     * The signer is disposed, securely erasing its key material, only if the account owns it.
      */
     dispose(): void;
 }

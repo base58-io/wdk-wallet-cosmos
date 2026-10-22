@@ -239,8 +239,9 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
    *
    * @param {ISignerCosmos} signer - The initialized Cosmos signer.
    * @param {ResolvedChainConfig} resolvedConfig - The resolved configuration object.
+   * @param {boolean} [shouldWipeSignerOnDisposal] - If true, the account owns the signer and disposes it in {@link dispose}.
    */
-  constructor(signer, resolvedConfig) {
+  constructor(signer, resolvedConfig, shouldWipeSignerOnDisposal = false) {
     // The address is served by the signer, which resolves it lazily.
     super(undefined, resolvedConfig)
 
@@ -251,6 +252,14 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
      * @type {ISignerCosmos}
      */
     this._signer = signer
+
+    /**
+     * If true, disposes the signer on calls to the 'dispose' method.
+     *
+     * @protected
+     * @type {boolean}
+     */
+    this._shouldWipeSignerOnDisposal = shouldWipeSignerOnDisposal
 
     /**
      * Whether this account has been disposed.
@@ -273,7 +282,9 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
     const rootSigner = new SeedSignerCosmos(seed, config)
     try {
       const signer = await rootSigner.derive(path)
-      return await WalletAccountCosmos.fromSigner(signer, config)
+      return await WalletAccountCosmos.fromSigner(signer, config, {
+        shouldWipeSignerOnDisposal: true,
+      })
     } finally {
       rootSigner.dispose()
     }
@@ -282,13 +293,25 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   /**
    * Creates a wallet account from an initialized Cosmos signer.
    *
+   * The signer stays owned by the caller: disposing the account leaves it untouched,
+   * unless `shouldWipeSignerOnDisposal` hands its ownership to the account.
+   *
    * @param {ISignerCosmos} signer - The Cosmos signer.
    * @param {CosmosWalletConfig} [config] - The configuration object.
+   * @param {{ shouldWipeSignerOnDisposal?: boolean }} [options] - Ownership options.
    * @returns {Promise<WalletAccountCosmos>} The wallet account instance.
    */
-  static async fromSigner(signer, config = {}) {
+  static async fromSigner(
+    signer,
+    config = {},
+    { shouldWipeSignerOnDisposal = false } = {}
+  ) {
     await signer.getAddress()
-    return new WalletAccountCosmos(signer, resolveChainConfig(config))
+    return new WalletAccountCosmos(
+      signer,
+      resolveChainConfig(config),
+      shouldWipeSignerOnDisposal
+    )
   }
 
   /**
@@ -690,15 +713,17 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   }
 
   /**
-   * Disposes the wallet account, securely erasing all sensitive data from memory.
-   * After calling this method, the account can no longer be used.
+   * Disposes the wallet account. After calling this method, the account can no longer be used.
+   * The signer is disposed, securely erasing its key material, only if the account owns it.
    */
   dispose() {
     if (this._disposed) {
       return
     }
 
-    this._signer.dispose()
+    if (this._shouldWipeSignerOnDisposal) {
+      this._signer.dispose()
+    }
     this._disposed = true
   }
 }
