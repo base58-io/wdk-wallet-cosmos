@@ -106,7 +106,8 @@ const hardwareAccount = await wallet.getAccount(0, {
   signerName: 'hardware',
 })
 
-// A named non-derivable signer represents one account directly
+// getAccount(name) uses the named signer as-is, with no derivation
+// The manager never disposes signers you register
 wallet.addSigner('account', accountSigner)
 const signerAccount = await wallet.getAccount('account')
 
@@ -263,10 +264,10 @@ const wallet = new WalletManagerCosmos(seedPhrase, {
 | Method                   | Description                                                      | Returns                                   |
 | ------------------------ | ---------------------------------------------------------------- | ----------------------------------------- |
 | `getAccount(index, options?)`      | Returns an account, optionally using `options.signerName`         | `Promise<WalletAccountCosmos>`            |
-| `getAccount(signerName)`           | Returns the account represented by a named signer                 | `Promise<WalletAccountCosmos>`            |
+| `getAccount(signerName)`           | Returns the account wrapping a named signer as-is, with no derivation. The manager never disposes signers you register | `Promise<WalletAccountCosmos>`            |
 | `getAccountByPath(path, options?)` | Returns an account by path, optionally using `options.signerName` | `Promise<WalletAccountCosmos>`            |
 | `getFeeRates()`          | Returns current fee rates for transactions                       | `Promise<{normal: bigint, fast: bigint}>` |
-| `dispose()`              | Disposes all wallet accounts, clearing private keys from memory  | `void`                                    |
+| `dispose()`              | Disposes all wallet accounts, clearing private keys from memory. Signers you pass in stay your responsibility | `void`                                    |
 
 ### Helper Functions
 
@@ -486,10 +487,10 @@ This package uses `sodium-universal` for cryptographically secure memory zeroing
 wallet.dispose()
 
 // Check if wallet was disposed
-console.log(wallet.isDisposed) // true
+console.log(wallet.disposed) // true
 
 // This will throw an error
-await wallet.getAccount(0) // Error: Cannot use disposed wallet manager
+await wallet.getAccount(0) // DisposalError: The wallet manager has been disposed.
 ```
 
 ## Platform Support
@@ -516,7 +517,7 @@ import WalletManagerCosmos from '@base58-io/wdk-wallet-cosmos'
 
 ### Prerequisites
 
-- Node.js 20.19+
+- Node.js 22.12+
 - Docker (for local testnet)
 
 ### Installation
