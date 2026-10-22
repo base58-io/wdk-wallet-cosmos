@@ -32,6 +32,10 @@ export type CosmosWalletConfig = {
      */
     gasPrice?: string;
     /**
+     * - The multiplier applied to simulated gas usage to set the gas limit (default: 1.3).
+     */
+    gasAdjustment?: number;
+    /**
      * - The maximum fee amount for transfer operations.
      */
     transferMaxFee?: number | bigint;
@@ -85,6 +89,10 @@ export type ResolvedChainConfig = {
         denom: string;
     };
     /**
+     * - The multiplier applied to simulated gas usage to set the gas limit.
+     */
+    gasAdjustment: number;
+    /**
      * - The maximum fee amount for transfer operations.
      */
     transferMaxFee?: number | bigint;
@@ -117,6 +125,7 @@ export type ResolvedChainConfig = {
  * @property {string} [nativeDenom] - The native token denomination (overrides registry, default: 'uatom').
  * @property {number} [coinType] - The BIP-44 coin type (overrides registry, default: 118).
  * @property {string} [gasPrice] - The gas price with denom (e.g. '0.025uatom').
+ * @property {number} [gasAdjustment] - The multiplier applied to simulated gas usage to set the gas limit (default: 1.3).
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
@@ -131,6 +140,7 @@ export type ResolvedChainConfig = {
  * @property {number} coinType - The BIP-44 coin type.
  * @property {string} [gasPrice] - The gas price with denom.
  * @property {{ low: number, average: number, high: number, denom: string }} [gasPriceStep] - Gas price tiers from chain-registry fee token metadata.
+ * @property {number} gasAdjustment - The multiplier applied to simulated gas usage to set the gas limit.
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {string} [chainId] - The chain ID (from registry).
@@ -142,7 +152,7 @@ export type ResolvedChainConfig = {
  *
  * @param {CosmosWalletConfig} config - The wallet configuration.
  * @returns {ResolvedChainConfig} The resolved chain configuration.
- * @throws {ValueError} If chainName is provided but not found in registry.
+ * @throws {ValueError} If chainName is provided but not found in registry, or gasAdjustment is invalid.
  *
  * @example
  * // Auto-config from registry

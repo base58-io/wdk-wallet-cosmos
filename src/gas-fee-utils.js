@@ -1,7 +1,8 @@
 'use strict'
 
 /**
- * Default gas limit for simple token transfers.
+ * Gas limit for fees that cannot be simulated: read-only account quotes and
+ * fee rates.
  *
  * @type {number}
  */
@@ -23,13 +24,10 @@ export const DEFAULT_GAS_PRICE_STEP = {
  * Calculates transaction fee amount from gas price and gas limit.
  *
  * @param {number} gasPriceAmount
- * @param {number} [gasLimit]
+ * @param {number} gasLimit
  * @returns {bigint | undefined}
  */
-export function calculateFeeAmountFromGasPrice(
-  gasPriceAmount,
-  gasLimit = DEFAULT_TRANSFER_GAS_LIMIT
-) {
+export function calculateFeeAmountFromGasPrice(gasPriceAmount, gasLimit) {
   if (!Number.isFinite(gasPriceAmount) || gasPriceAmount <= 0) {
     return undefined
   }

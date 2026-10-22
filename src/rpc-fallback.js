@@ -48,6 +48,13 @@ const NON_RETRYABLE_RPC_CODES = new Set([
   -32602, // Invalid params
 ])
 
+/**
+ * A query the node executed and the application rejected with an ABCI code,
+ * such as a transaction simulation that fails. The outcome is deterministic,
+ * whatever the log text says.
+ */
+const ABCI_QUERY_FAILURE = /^Query failed with \(\d+\)/
+
 const NON_RETRYABLE_ERROR_PATTERNS =
   /insufficient funds|out of gas|invalid sequence|incorrect account sequence|signature verification failed|unauthorized|invalid address|unknown address|invalid coins|memo too large|tx too large|invalid chain-id|tx timeout|invalid pubkey|account.*not found|invalid request|unknown request|no signatures|maximum.*signatures|signer does not match|feature not supported|invalid gas/i
 
@@ -73,6 +80,10 @@ export function shouldThrow(error) {
   }
 
   const message = error?.message ?? ''
+
+  if (ABCI_QUERY_FAILURE.test(message)) {
+    return true
+  }
 
   if (NON_RETRYABLE_ERROR_PATTERNS.test(message)) {
     return true

@@ -22,8 +22,8 @@ export declare class ISignerCosmos extends ISigner {
     get isDerivable(): boolean;
     /** @type {string | null} */
     get path(): string | null;
-    /** @type {KeyPair} */
-    get keyPair(): KeyPair;
+    /** @type {KeyPair | null} */
+    get keyPair(): KeyPair | null;
     /**
      * @param {string} relPath - Relative Cosmos BIP-44 path.
      * @returns {Promise<ISignerCosmos>}

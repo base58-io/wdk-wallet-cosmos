@@ -1,5 +1,9 @@
 import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx';
 import WalletAccountCosmosReadOnly from './wallet-account-cosmos-read-only.js';
+export type Coin = import('@cosmjs/amino').Coin;
+export type StdFee = import('@cosmjs/amino').StdFee;
+export type EncodeObject = import('@cosmjs/proto-signing').EncodeObject;
+export type DeliverTxResponse = import('@cosmjs/stargate').DeliverTxResponse;
 export type IWalletAccount = import('@tetherto/wdk-wallet').IWalletAccount<TxRaw>;
 export type KeyPair = import('@tetherto/wdk-wallet').KeyPair;
 export type Transaction = import('@tetherto/wdk-wallet').Transaction;
@@ -7,6 +11,24 @@ export type TransactionResult = import('@tetherto/wdk-wallet').TransactionResult
 export type TransferOptions = import('@tetherto/wdk-wallet').TransferOptions;
 export type TransferResult = import('@tetherto/wdk-wallet').TransferResult;
 export type ISignerCosmos = import('./signers/seed-signer-cosmos.js').ISignerCosmos;
+export type PreparedTransaction = {
+    /**
+     * - The messages to sign.
+     */
+    messages: EncodeObject[];
+    /**
+     * - The transaction memo.
+     */
+    memo: string;
+    /**
+     * - The fee at the simulated gas limit.
+     */
+    fee: StdFee;
+    /**
+     * - The fee amount in base units.
+     */
+    totalFee: bigint;
+};
 export type CosmosTransaction = {
     /**
      * - The recipient address.
@@ -147,22 +169,91 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      */
     getAddress(): Promise<string>;
     /**
+     * Quotes the costs of a transfer by simulating it.
+     *
+     * @param {TransferOptions & { memo?: string }} options - The transfer's options.
+     * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
+     * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
+     * @throws {ProviderError} If the provider fails to estimate the costs of the transfer.
+     * @throws {Error} If the chain rejects the simulated transfer.
+     */
+    quoteTransfer(options: TransferOptions & {
+        memo?: string;
+    }): Promise<Omit<TransferResult, 'hash'>>;
+    /**
      * Transfers tokens to another address.
+     *
+     * The transfer is simulated first, and signed with the simulated gas limit.
      *
      * @param {TransferOptions & { memo?: string }} options - The transfer's
      *   options. When `memo` is set it replaces the default transaction memo;
      *   on the IBC path it is also set on the `MsgTransfer` payload.
      * @returns {Promise<TransferResult>} The transfer's result.
+     * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
+     * @throws {ProviderError} If the provider fails to estimate the costs of the transfer.
+     * @throws {TransferError} If the transfer failed on chain for insufficient funds.
+     * @throws {Error} If the chain rejects the simulated transfer, or the transfer failed on chain for any other reason.
      */
     transfer(options: TransferOptions & {
         memo?: string;
     }): Promise<TransferResult>;
     /**
-     * The account's key pair.
+     * Builds a transfer's message and prices it by simulation: a bank `MsgSend`
+     * for a recipient with this chain's prefix, an IBC `MsgTransfer` over the
+     * configured channel otherwise.
      *
-     * @type {KeyPair}
+     * @protected
+     * @param {TransferOptions & { memo?: string }} options - The transfer's options.
+     * @returns {Promise<PreparedTransaction>} The transfer, ready to sign.
      */
-    get keyPair(): KeyPair;
+    protected _prepareTransfer({ token, recipient, amount, memo }: TransferOptions & {
+        memo?: string;
+    }): Promise<PreparedTransaction>;
+    /**
+     * Builds the bank `MsgSend` for an unsigned transaction and prices it by
+     * simulation.
+     *
+     * @protected
+     * @param {Transaction} transaction - The transaction.
+     * @returns {Promise<PreparedTransaction>} The transaction, ready to sign.
+     */
+    protected _prepareTransaction(transaction: Transaction): Promise<PreparedTransaction>;
+    /**
+     * Simulates messages and builds the fee to sign them with.
+     *
+     * @protected
+     * @param {EncodeObject[]} messages - The messages to sign.
+     * @param {string} memo - The transaction memo.
+     * @returns {Promise<PreparedTransaction>} The messages, ready to sign.
+     */
+    protected _prepareMessages(messages: EncodeObject[], memo: string): Promise<PreparedTransaction>;
+    /**
+     * Simulates messages and returns the gas limit to sign them with: the gas
+     * used, scaled by `gasAdjustment` and rounded up.
+     *
+     * The simulated transaction carries a fee of one base unit of the gas price
+     * denom, so the chain charges the fee deduction a signed transaction pays
+     * for; without a fee the simulation under-reports gas. The fee amount barely
+     * affects gas used.
+     *
+     * Transport failures fail over across the RPC endpoints. A simulation the
+     * chain rejects (an ABCI error, e.g. insufficient funds or an invalid
+     * message) is thrown at once with the chain's code and log.
+     *
+     * @protected
+     * @param {EncodeObject[]} messages - The messages to simulate.
+     * @param {string} memo - The transaction memo.
+     * @returns {Promise<number>} The gas limit.
+     * @throws {ProviderError} If every RPC endpoint fails to simulate the messages.
+     * @throws {Error} If the chain rejects the simulation.
+     */
+    protected _estimateGas(messages: EncodeObject[], memo: string): Promise<number>;
+    /**
+     * The account's key pair, or null if the signer does not expose key material.
+     *
+     * @type {KeyPair | null}
+     */
+    get keyPair(): KeyPair | null;
     /**
      * Signs a message.
      *
@@ -182,6 +273,15 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      * @returns {Promise<string>} The base64-encoded 33-byte public key.
      */
     getPublicKey(): Promise<string>;
+    /**
+     * Returns the compressed secp256k1 public key the signer reports for this
+     * account's address. Read from the signer's accounts rather than its key
+     * pair, so signers that keep their key material private work too.
+     *
+     * @private
+     * @returns {Promise<Uint8Array>} The 33-byte public key.
+     */
+    private _getSignerPublicKey;
     /**
      * Ensures a requested signer address belongs to this account.
      *
@@ -216,17 +316,39 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      */
     signAmino(params: SignAminoParams): Promise<SignAminoResult>;
     /**
-     * Signs a transaction without broadcasting it.
+     * Quotes the cost of sending a transaction. An unsigned transaction is
+     * simulated; a signed one is quoted at the fee it carries.
+     *
+     * @param {Transaction | TxRaw} transaction - The transaction to quote.
+     * @returns {Promise<{fee: bigint}>} The estimated fee.
+     * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transaction max. fee option.
+     * @throws {ProviderError} If the provider fails to estimate the costs of the transaction.
+     * @throws {Error} If the chain rejects the simulated transaction.
+     */
+    quoteSendTransaction(transaction: Transaction | TxRaw): Promise<{
+        fee: bigint;
+    }>;
+    /**
+     * Signs a transaction without broadcasting it, at the simulated gas limit.
      *
      * @param {Transaction} transaction - The transaction to sign.
      * @returns {Promise<TxRaw>} The signed Cosmos transaction.
+     * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transaction max. fee option.
+     * @throws {ProviderError} If the provider fails to estimate the costs of the transaction.
+     * @throws {Error} If the chain rejects the simulated transaction.
      */
     signTransaction(transaction: Transaction): Promise<TxRaw>;
     /**
-     * Sends an unsigned or previously signed transaction.
+     * Sends an unsigned or previously signed transaction. An unsigned
+     * transaction is simulated and signed at the simulated gas limit; a signed
+     * one is broadcast as-is.
      *
      * @param {Transaction | TxRaw} transaction - The transaction to send.
      * @returns {Promise<TransactionResult>} The transaction's result.
+     * @throws {MaximumFeeExceededError} If the fee exceeds the transaction max. fee option.
+     * @throws {ProviderError} If the provider fails to estimate the costs of the transaction.
+     * @throws {TransactionError} If the transaction failed on chain for insufficient funds.
+     * @throws {Error} If the chain rejects the simulated transaction, or the transaction failed on chain for any other reason.
      */
     sendTransaction(transaction: Transaction | TxRaw): Promise<TransactionResult>;
     /**

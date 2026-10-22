@@ -23,11 +23,11 @@ import { resolveChainConfig } from './chain-config-resolver.js'
 import {
   DEFAULT_GAS_PRICE_STEP,
   DEFAULT_TRANSFER_GAS_LIMIT,
-  calculateFeeAmountFromGasPrice,
   extractGasPrice,
 } from './gas-fee-utils.js'
 import { withFallback } from './rpc-fallback.js'
 
+/** @typedef {import('@cosmjs/amino').StdFee} StdFee */
 /** @typedef {import('@cosmjs/amino').StdSignature} StdSignature */
 /** @typedef {import('@cosmjs/stargate').IndexedTx} IndexedTx */
 /** @typedef {import('@tetherto/wdk-wallet').Transaction} Transaction */
@@ -43,10 +43,6 @@ import { withFallback } from './rpc-fallback.js'
  *
  * @typedef {TransactionReceipt & { transaction: IndexedTx }} CosmosTransactionReceipt
  */
-
-// Default gas limit for simple token transfers
-// In production, this should be estimated per-transaction via simulation
-const DEFAULT_GAS_LIMIT = DEFAULT_TRANSFER_GAS_LIMIT.toString()
 
 // CometBFT chains produce blocks roughly every 6 seconds.
 const BLOCK_TIME = 6000
@@ -271,10 +267,11 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
   }
 
   /**
-   * Parses the gas price from config into denom and amount.
+   * Returns the per-unit gas price: the registry's average gas price, else the
+   * configured `gasPrice`, else the default average price in the native denom.
    *
    * @protected
-   * @returns {{gasDenom: string, gasAmount: string}} The parsed gas price.
+   * @returns {{ denom: string, amount: number }} The gas price.
    */
   _parseGasPrice() {
     const gasPriceStep = this._config.gasPriceStep
@@ -283,55 +280,36 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
       Number.isFinite(gasPriceStep.average) &&
       gasPriceStep.average > 0
     ) {
-      const gasAmount = calculateFeeAmountFromGasPrice(
-        gasPriceStep.average,
-        DEFAULT_TRANSFER_GAS_LIMIT
-      )
-      if (gasAmount) {
-        return {
-          gasDenom: gasPriceStep.denom,
-          gasAmount: gasAmount.toString(),
-        }
-      }
+      return { denom: gasPriceStep.denom, amount: gasPriceStep.average }
     }
 
     const extractedGasPrice = extractGasPrice(this._config.gasPrice)
     if (extractedGasPrice) {
-      const gasAmount = calculateFeeAmountFromGasPrice(
-        extractedGasPrice.gasPriceAmount,
-        DEFAULT_TRANSFER_GAS_LIMIT
-      )
-      if (gasAmount) {
-        return {
-          gasDenom: extractedGasPrice.gasPriceDenomination,
-          gasAmount: gasAmount.toString(),
-        }
+      return {
+        denom: extractedGasPrice.gasPriceDenomination,
+        amount: extractedGasPrice.gasPriceAmount,
       }
     }
 
-    const defaultGasAmount = calculateFeeAmountFromGasPrice(
-      DEFAULT_GAS_PRICE_STEP.average,
-      DEFAULT_TRANSFER_GAS_LIMIT
-    )
-
     return {
-      gasDenom: this._config.nativeDenom,
-      gasAmount: defaultGasAmount ? defaultGasAmount.toString() : '0',
+      denom: this._config.nativeDenom,
+      amount: DEFAULT_GAS_PRICE_STEP.average,
     }
   }
 
   /**
-   * Builds the standard fee for a simple transfer.
+   * Builds the fee for a gas limit, priced at {@link _parseGasPrice}.
    *
    * @protected
-   * @returns {{ amount: Array<{denom: string, amount: string}>, gas: string }} The fee.
+   * @param {number} gasLimit - The transaction's gas limit.
+   * @returns {StdFee} The fee.
    */
-  _buildTransferFee() {
-    const { gasDenom, gasAmount } = this._parseGasPrice()
+  _buildFee(gasLimit) {
+    const { denom, amount } = this._parseGasPrice()
 
     return {
-      amount: [{ denom: gasDenom, amount: gasAmount }],
-      gas: DEFAULT_GAS_LIMIT,
+      amount: [{ denom, amount: String(Math.ceil(amount * gasLimit)) }],
+      gas: String(gasLimit),
     }
   }
 
@@ -378,6 +356,10 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
   /**
    * Quotes the costs of a transfer operation.
    *
+   * A read-only account cannot simulate the transfer (simulation needs the
+   * sender's public key), so the quote uses the fixed
+   * {@link DEFAULT_TRANSFER_GAS_LIMIT}.
+   *
    * @param {TransferOptions} options - The transfer's options.
    * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
    * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
@@ -391,7 +373,8 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
       this._getIbcChannelConfigForPrefix(recipientPrefix)
     }
 
-    const estimatedFee = BigInt(this._parseGasPrice().gasAmount)
+    const fee = this._buildFee(DEFAULT_TRANSFER_GAS_LIMIT)
+    const estimatedFee = BigInt(fee.amount[0].amount)
     this._assertTransferFeeWithinLimit(estimatedFee)
 
     return {
@@ -401,6 +384,10 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
 
   /**
    * Quotes the cost of sending an unsigned or signed transaction.
+   *
+   * A signed transaction is quoted at the fee it carries. An unsigned one uses
+   * the fixed {@link DEFAULT_TRANSFER_GAS_LIMIT}, since a read-only account
+   * cannot simulate it.
    *
    * @param {Transaction | TxRaw} transaction - The transaction to quote.
    * @returns {Promise<{fee: bigint}>} The estimated fee.
@@ -414,7 +401,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
       ? this._getSignedTransactionFee(
           TxRaw.encode(/** @type {TxRaw} */ (transaction)).finish()
         )
-      : BigInt(this._parseGasPrice().gasAmount)
+      : BigInt(this._buildFee(DEFAULT_TRANSFER_GAS_LIMIT).amount[0].amount)
 
     this._assertTransactionFeeWithinLimit(estimatedFee)
 

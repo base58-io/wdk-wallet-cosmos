@@ -80,7 +80,7 @@ export class ISignerCosmos extends ISigner {
     throw new NotImplementedError('path')
   }
 
-  /** @type {KeyPair} */
+  /** @type {KeyPair | null} */
   get keyPair() {
     throw new NotImplementedError('keyPair')
   }

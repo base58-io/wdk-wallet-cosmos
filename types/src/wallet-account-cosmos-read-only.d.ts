@@ -1,5 +1,6 @@
 import { WalletAccountReadOnly } from '@tetherto/wdk-wallet';
 import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx';
+export type StdFee = import('@cosmjs/amino').StdFee;
 export type StdSignature = import('@cosmjs/amino').StdSignature;
 export type IndexedTx = import('@cosmjs/stargate').IndexedTx;
 export type Transaction = import('@tetherto/wdk-wallet').Transaction;
@@ -105,28 +106,24 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      */
     getTokenBalances(denoms: string[]): Promise<Record<string, bigint>>;
     /**
-     * Parses the gas price from config into denom and amount.
+     * Returns the per-unit gas price: the registry's average gas price, else the
+     * configured `gasPrice`, else the default average price in the native denom.
      *
      * @protected
-     * @returns {{gasDenom: string, gasAmount: string}} The parsed gas price.
+     * @returns {{ denom: string, amount: number }} The gas price.
      */
     protected _parseGasPrice(): {
-        gasDenom: string;
-        gasAmount: string;
+        denom: string;
+        amount: number;
     };
     /**
-     * Builds the standard fee for a simple transfer.
+     * Builds the fee for a gas limit, priced at {@link _parseGasPrice}.
      *
      * @protected
-     * @returns {{ amount: Array<{denom: string, amount: string}>, gas: string }} The fee.
+     * @param {number} gasLimit - The transaction's gas limit.
+     * @returns {StdFee} The fee.
      */
-    protected _buildTransferFee(): {
-        amount: Array<{
-            denom: string;
-            amount: string;
-        }>;
-        gas: string;
-    };
+    protected _buildFee(gasLimit: number): StdFee;
     /**
      * Extracts Bech32 prefix from an address.
      *
@@ -148,6 +145,10 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
     /**
      * Quotes the costs of a transfer operation.
      *
+     * A read-only account cannot simulate the transfer (simulation needs the
+     * sender's public key), so the quote uses the fixed
+     * {@link DEFAULT_TRANSFER_GAS_LIMIT}.
+     *
      * @param {TransferOptions} options - The transfer's options.
      * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
      * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
@@ -155,6 +156,10 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
     quoteTransfer(options: TransferOptions): Promise<Omit<TransferResult, 'hash'>>;
     /**
      * Quotes the cost of sending an unsigned or signed transaction.
+     *
+     * A signed transaction is quoted at the fee it carries. An unsigned one uses
+     * the fixed {@link DEFAULT_TRANSFER_GAS_LIMIT}, since a read-only account
+     * cannot simulate it.
      *
      * @param {Transaction | TxRaw} transaction - The transaction to quote.
      * @returns {Promise<{fee: bigint}>} The estimated fee.

@@ -1,14 +1,41 @@
 'use strict'
 
+import { encodeSecp256k1Pubkey } from '@cosmjs/amino'
 import { fromBase64, toBase64 } from '@cosmjs/encoding'
-import { makeSignDoc as makeDirectSignDoc } from '@cosmjs/proto-signing'
-import { SigningStargateClient, StargateClient } from '@cosmjs/stargate'
-import { ValueError } from '@tetherto/wdk-wallet'
-import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
+import {
+  Registry,
+  encodePubkey,
+  makeSignDoc as makeDirectSignDoc,
+} from '@cosmjs/proto-signing'
+import {
+  QueryClient,
+  SigningStargateClient,
+  StargateClient,
+  createProtobufRpcClient,
+  defaultRegistryTypes,
+} from '@cosmjs/stargate'
+import { connectComet } from '@cosmjs/tendermint-rpc'
+import {
+  TransactionError,
+  TransactionErrorReason,
+  TransferError,
+  TransferErrorReason,
+  ValueError,
+} from '@tetherto/wdk-wallet'
+import { SignMode } from 'cosmjs-types/cosmos/tx/signing/v1beta1/signing'
+import {
+  ServiceClientImpl,
+  SimulateRequest,
+} from 'cosmjs-types/cosmos/tx/v1beta1/service'
+import { Tx, TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import { resolveChainConfig } from './chain-config-resolver.js'
 import SeedSignerCosmos from './signers/seed-signer-cosmos.js'
 import WalletAccountCosmosReadOnly from './wallet-account-cosmos-read-only.js'
 
+/** @typedef {import('@cosmjs/amino').Coin} Coin */
+/** @typedef {import('@cosmjs/amino').StdFee} StdFee */
+/** @typedef {import('@cosmjs/proto-signing').EncodeObject} EncodeObject */
+/** @typedef {import('@cosmjs/stargate').DeliverTxResponse} DeliverTxResponse */
 /** @typedef {import('@tetherto/wdk-wallet').IWalletAccount<TxRaw>} IWalletAccount */
 /** @typedef {import('@tetherto/wdk-wallet').KeyPair} KeyPair */
 /** @typedef {import('@tetherto/wdk-wallet').Transaction} Transaction */
@@ -16,6 +43,16 @@ import WalletAccountCosmosReadOnly from './wallet-account-cosmos-read-only.js'
 /** @typedef {import('@tetherto/wdk-wallet').TransferOptions} TransferOptions */
 /** @typedef {import('@tetherto/wdk-wallet').TransferResult} TransferResult */
 /** @typedef {import('./signers/seed-signer-cosmos.js').ISignerCosmos} ISignerCosmos */
+
+/**
+ * Messages ready to sign, with the fee their simulation priced.
+ *
+ * @typedef {Object} PreparedTransaction
+ * @property {EncodeObject[]} messages - The messages to sign.
+ * @property {string} memo - The transaction memo.
+ * @property {StdFee} fee - The fee at the simulated gas limit.
+ * @property {bigint} totalFee - The fee amount in base units.
+ */
 
 /**
  * @typedef {Object} CosmosTransaction
@@ -79,6 +116,62 @@ import WalletAccountCosmosReadOnly from './wallet-account-cosmos-read-only.js'
  */
 
 const DECIMAL_STRING_PATTERN = /^(?:0|[1-9][0-9]*)$/
+
+// How long an IBC transfer packet stays relayable before it times out.
+const IBC_TIMEOUT_SECONDS = 600
+
+// Insufficient funds is the one on-chain failure the WDK error reasons name.
+const INSUFFICIENT_FUNDS_PATTERN = /insufficient funds/i
+
+/**
+ * Throws when a broadcast transaction was included in a block but failed.
+ * Insufficient funds surfaces as the WDK error for the operation; any other
+ * ABCI failure is thrown with the chain's code and log.
+ *
+ * @param {DeliverTxResponse} result - The broadcast result.
+ * @param {'transfer' | 'transaction'} operation - The operation that was broadcast.
+ * @throws {TransferError} If a transfer failed for insufficient funds.
+ * @throws {TransactionError} If a transaction failed for insufficient funds.
+ * @throws {Error} If the transaction failed for any other reason.
+ */
+function assertDelivered(result, operation) {
+  if (result.code === 0) {
+    return
+  }
+
+  // Chains on Cosmos SDK 0.50+ only fill the log for failed transactions.
+  const log = result.rawLog ?? ''
+  const message = `The ${operation} ${result.transactionHash} failed on chain with code ${result.code}: ${log}`
+
+  if (!INSUFFICIENT_FUNDS_PATTERN.test(log)) {
+    throw new Error(message)
+  }
+
+  if (operation === 'transfer') {
+    throw new TransferError(message, {
+      reason: TransferErrorReason.INSUFFICIENT_BALANCE,
+    })
+  }
+
+  throw new TransactionError(message, {
+    reason: TransactionErrorReason.INSUFFICIENT_BALANCE,
+  })
+}
+
+/**
+ * Builds a bank `MsgSend`.
+ *
+ * @param {string} fromAddress - The sender address.
+ * @param {string} toAddress - The recipient address.
+ * @param {Coin[]} amount - The coins to send.
+ * @returns {EncodeObject} The message.
+ */
+function createMsgSend(fromAddress, toAddress, amount) {
+  return {
+    typeUrl: '/cosmos.bank.v1beta1.MsgSend',
+    value: { fromAddress, toAddress, amount },
+  }
+}
 
 /**
  * Checks whether a value is a non-negative decimal integer string.
@@ -325,86 +418,56 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   }
 
   /**
+   * Quotes the costs of a transfer by simulating it.
+   *
+   * @param {TransferOptions & { memo?: string }} options - The transfer's options.
+   * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
+   * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
+   * @throws {ProviderError} If the provider fails to estimate the costs of the transfer.
+   * @throws {Error} If the chain rejects the simulated transfer.
+   */
+  async quoteTransfer(options) {
+    this._assertNotDisposed()
+    this._assertRpcEndpoints('transfer tokens')
+
+    const { totalFee } = await this._prepareTransfer(options)
+    this._assertTransferFeeWithinLimit(totalFee)
+
+    return { fee: totalFee }
+  }
+
+  /**
    * Transfers tokens to another address.
+   *
+   * The transfer is simulated first, and signed with the simulated gas limit.
    *
    * @param {TransferOptions & { memo?: string }} options - The transfer's
    *   options. When `memo` is set it replaces the default transaction memo;
    *   on the IBC path it is also set on the `MsgTransfer` payload.
    * @returns {Promise<TransferResult>} The transfer's result.
+   * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
+   * @throws {ProviderError} If the provider fails to estimate the costs of the transfer.
+   * @throws {TransferError} If the transfer failed on chain for insufficient funds.
+   * @throws {Error} If the chain rejects the simulated transfer, or the transfer failed on chain for any other reason.
    */
   async transfer(options) {
     this._assertNotDisposed()
 
     const endpoints = this._assertRpcEndpoints('transfer tokens')
 
-    const { token, recipient, amount, memo } = options
-    const address = await this.getAddress()
-
-    const recipientPrefix = this._getBech32Prefix(recipient)
-    const isSamePrefix = recipientPrefix === this._config.addressPrefix
-
-    const sendAmount = {
-      denom: token,
-      amount: amount.toString(),
-    }
-
-    const fee = this._buildTransferFee()
-
-    const channelConfig = isSamePrefix
-      ? null
-      : this._getIbcChannelConfigForPrefix(recipientPrefix)
-    const totalFee = BigInt(fee.amount[0].amount)
-
+    const { messages, memo, fee, totalFee } =
+      await this._prepareTransfer(options)
     this._assertTransferFeeWithinLimit(totalFee)
 
+    const address = await this.getAddress()
     const result = await this._withFallback(endpoints, async endpoint => {
       const client = await SigningStargateClient.connectWithSigner(
         endpoint,
         this._signer
       )
-
-      if (isSamePrefix) {
-        return client.sendTokens(
-          address,
-          recipient,
-          [sendAmount],
-          fee,
-          memo ?? 'Transfer via WDK'
-        )
-      }
-
-      const timeoutSeconds = 600
-      const timeoutTimestampNanoseconds = String(
-        (Date.now() + timeoutSeconds * 1000) * 1_000_000
-      )
-
-      const msgTransfer = {
-        typeUrl: '/ibc.applications.transfer.v1.MsgTransfer',
-        value: {
-          sourcePort: 'transfer',
-          sourceChannel: /** @type {{ sourceChannel: string }} */ (
-            channelConfig
-          ).sourceChannel,
-          token: sendAmount,
-          sender: address,
-          receiver: recipient,
-          timeoutHeight: undefined,
-          timeoutTimestamp: timeoutTimestampNanoseconds,
-          memo: memo ?? 'Transfer via WDK (IBC)',
-        },
-      }
-
-      const broadcastResult = await client.signAndBroadcast(
-        address,
-        [msgTransfer],
-        fee,
-        memo ?? 'Transfer via WDK (IBC)'
-      )
-
-      return {
-        transactionHash: broadcastResult.transactionHash,
-      }
+      return client.signAndBroadcast(address, messages, fee, memo)
     })
+    assertDelivered(result, 'transfer')
 
     return {
       hash: result.transactionHash,
@@ -413,9 +476,156 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   }
 
   /**
-   * The account's key pair.
+   * Builds a transfer's message and prices it by simulation: a bank `MsgSend`
+   * for a recipient with this chain's prefix, an IBC `MsgTransfer` over the
+   * configured channel otherwise.
    *
-   * @type {KeyPair}
+   * @protected
+   * @param {TransferOptions & { memo?: string }} options - The transfer's options.
+   * @returns {Promise<PreparedTransaction>} The transfer, ready to sign.
+   */
+  async _prepareTransfer({ token, recipient, amount, memo }) {
+    const address = await this.getAddress()
+    const recipientPrefix = this._getBech32Prefix(recipient)
+    const sendAmount = { denom: token, amount: amount.toString() }
+
+    if (recipientPrefix === this._config.addressPrefix) {
+      return await this._prepareMessages(
+        [createMsgSend(address, recipient, [sendAmount])],
+        memo ?? 'Transfer via WDK'
+      )
+    }
+
+    const { sourceChannel } =
+      this._getIbcChannelConfigForPrefix(recipientPrefix)
+    const ibcMemo = memo ?? 'Transfer via WDK (IBC)'
+    const timeoutTimestampNanoseconds = String(
+      (Date.now() + IBC_TIMEOUT_SECONDS * 1000) * 1_000_000
+    )
+
+    const msgTransfer = {
+      typeUrl: '/ibc.applications.transfer.v1.MsgTransfer',
+      value: {
+        sourcePort: 'transfer',
+        sourceChannel,
+        token: sendAmount,
+        sender: address,
+        receiver: recipient,
+        timeoutHeight: undefined,
+        timeoutTimestamp: timeoutTimestampNanoseconds,
+        memo: ibcMemo,
+      },
+    }
+
+    return await this._prepareMessages([msgTransfer], ibcMemo)
+  }
+
+  /**
+   * Builds the bank `MsgSend` for an unsigned transaction and prices it by
+   * simulation.
+   *
+   * @protected
+   * @param {Transaction} transaction - The transaction.
+   * @returns {Promise<PreparedTransaction>} The transaction, ready to sign.
+   */
+  async _prepareTransaction(transaction) {
+    const { to, amount, memo } = this._toCosmosTransaction(transaction)
+    const address = await this.getAddress()
+
+    return await this._prepareMessages(
+      [createMsgSend(address, to, amount)],
+      memo ?? ''
+    )
+  }
+
+  /**
+   * Simulates messages and builds the fee to sign them with.
+   *
+   * @protected
+   * @param {EncodeObject[]} messages - The messages to sign.
+   * @param {string} memo - The transaction memo.
+   * @returns {Promise<PreparedTransaction>} The messages, ready to sign.
+   */
+  async _prepareMessages(messages, memo) {
+    const fee = this._buildFee(await this._estimateGas(messages, memo))
+
+    return { messages, memo, fee, totalFee: BigInt(fee.amount[0].amount) }
+  }
+
+  /**
+   * Simulates messages and returns the gas limit to sign them with: the gas
+   * used, scaled by `gasAdjustment` and rounded up.
+   *
+   * The simulated transaction carries a fee of one base unit of the gas price
+   * denom, so the chain charges the fee deduction a signed transaction pays
+   * for; without a fee the simulation under-reports gas. The fee amount barely
+   * affects gas used.
+   *
+   * Transport failures fail over across the RPC endpoints. A simulation the
+   * chain rejects (an ABCI error, e.g. insufficient funds or an invalid
+   * message) is thrown at once with the chain's code and log.
+   *
+   * @protected
+   * @param {EncodeObject[]} messages - The messages to simulate.
+   * @param {string} memo - The transaction memo.
+   * @returns {Promise<number>} The gas limit.
+   * @throws {ProviderError} If every RPC endpoint fails to simulate the messages.
+   * @throws {Error} If the chain rejects the simulation.
+   */
+  async _estimateGas(messages, memo) {
+    const endpoints = this._assertRpcEndpoints()
+    const address = await this.getAddress()
+    const publicKey = encodePubkey(
+      encodeSecp256k1Pubkey(await this._getSignerPublicKey())
+    )
+    const fee = { amount: [{ denom: this._parseGasPrice().denom, amount: '1' }] }
+    const registry = new Registry(defaultRegistryTypes)
+    const body = {
+      messages: messages.map(message => registry.encodeAsAny(message)),
+      memo,
+    }
+
+    const gasUsed = await this._withFallback(endpoints, async endpoint => {
+      const comet = await connectComet(endpoint)
+      const { sequence } = await StargateClient.create(comet).getSequence(
+        address
+      )
+
+      const tx = Tx.fromPartial({
+        body,
+        authInfo: {
+          fee,
+          signerInfos: [
+            {
+              publicKey,
+              sequence: BigInt(sequence),
+              modeInfo: { single: { mode: SignMode.SIGN_MODE_UNSPECIFIED } },
+            },
+          ],
+        },
+        signatures: [new Uint8Array()],
+      })
+
+      const service = new ServiceClientImpl(
+        createProtobufRpcClient(new QueryClient(comet))
+      )
+      const { gasInfo } = await service.Simulate(
+        SimulateRequest.fromPartial({ txBytes: Tx.encode(tx).finish() })
+      )
+      if (!gasInfo) {
+        throw new Error('The transaction simulation returned no gas info.')
+      }
+
+      return Number(gasInfo.gasUsed)
+    })
+
+    return Math.ceil(gasUsed * this._config.gasAdjustment)
+  }
+
+  /**
+   * The account's key pair, or null if the signer does not expose key material.
+   *
+   * @type {KeyPair | null}
    */
   get keyPair() {
     this._assertNotDisposed()
@@ -445,9 +655,25 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
    * @returns {Promise<string>} The base64-encoded 33-byte public key.
    */
   async getPublicKey() {
-    this._assertNotDisposed()
-    await this._signer.getAddress()
-    return toBase64(this.keyPair.publicKey)
+    return toBase64(await this._getSignerPublicKey())
+  }
+
+  /**
+   * Returns the compressed secp256k1 public key the signer reports for this
+   * account's address. Read from the signer's accounts rather than its key
+   * pair, so signers that keep their key material private work too.
+   *
+   * @private
+   * @returns {Promise<Uint8Array>} The 33-byte public key.
+   */
+  async _getSignerPublicKey() {
+    const address = await this.getAddress()
+    const accounts = await this._signer.getAccounts()
+    const account = accounts.find(account => account.address === address)
+    if (!account) {
+      throw new Error(`The signer has no account for address ${address}.`)
+    }
+    return account.pubkey
   }
 
   /**
@@ -563,50 +789,71 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   }
 
   /**
-   * Signs a transaction without broadcasting it.
+   * Quotes the cost of sending a transaction. An unsigned transaction is
+   * simulated; a signed one is quoted at the fee it carries.
+   *
+   * @param {Transaction | TxRaw} transaction - The transaction to quote.
+   * @returns {Promise<{fee: bigint}>} The estimated fee.
+   * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transaction max. fee option.
+   * @throws {ProviderError} If the provider fails to estimate the costs of the transaction.
+   * @throws {Error} If the chain rejects the simulated transaction.
+   */
+  async quoteSendTransaction(transaction) {
+    if (this._isSignedTransaction(transaction)) {
+      return await super.quoteSendTransaction(transaction)
+    }
+
+    this._assertNotDisposed()
+    this._assertRpcEndpoints('send transactions')
+
+    const { totalFee } = await this._prepareTransaction(
+      /** @type {Transaction} */ (transaction)
+    )
+    this._assertTransactionFeeWithinLimit(totalFee)
+
+    return { fee: totalFee }
+  }
+
+  /**
+   * Signs a transaction without broadcasting it, at the simulated gas limit.
    *
    * @param {Transaction} transaction - The transaction to sign.
    * @returns {Promise<TxRaw>} The signed Cosmos transaction.
+   * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transaction max. fee option.
+   * @throws {ProviderError} If the provider fails to estimate the costs of the transaction.
+   * @throws {Error} If the chain rejects the simulated transaction.
    */
   async signTransaction(transaction) {
     this._assertNotDisposed()
 
     const endpoints = this._assertRpcEndpoints('sign transactions')
 
-    const cosmosTransaction = this._toCosmosTransaction(transaction)
-    const fee = this._buildTransferFee()
-    this._assertTransactionFeeWithinLimit(BigInt(fee.amount[0].amount))
+    const { messages, memo, fee, totalFee } =
+      await this._prepareTransaction(transaction)
+    this._assertTransactionFeeWithinLimit(totalFee)
 
-    const signerAddress = await this.getAddress()
-    const message = {
-      typeUrl: '/cosmos.bank.v1beta1.MsgSend',
-      value: {
-        fromAddress: signerAddress,
-        toAddress: cosmosTransaction.to,
-        amount: cosmosTransaction.amount,
-      },
-    }
+    const address = await this.getAddress()
 
     return await this._withFallback(endpoints, async endpoint => {
       const client = await SigningStargateClient.connectWithSigner(
         endpoint,
         this._signer
       )
-
-      return client.sign(
-        signerAddress,
-        [message],
-        fee,
-        cosmosTransaction.memo || ''
-      )
+      return client.sign(address, messages, fee, memo)
     })
   }
 
   /**
-   * Sends an unsigned or previously signed transaction.
+   * Sends an unsigned or previously signed transaction. An unsigned
+   * transaction is simulated and signed at the simulated gas limit; a signed
+   * one is broadcast as-is.
    *
    * @param {Transaction | TxRaw} transaction - The transaction to send.
    * @returns {Promise<TransactionResult>} The transaction's result.
+   * @throws {MaximumFeeExceededError} If the fee exceeds the transaction max. fee option.
+   * @throws {ProviderError} If the provider fails to estimate the costs of the transaction.
+   * @throws {TransactionError} If the transaction failed on chain for insufficient funds.
+   * @throws {Error} If the chain rejects the simulated transaction, or the transaction failed on chain for any other reason.
    */
   async sendTransaction(transaction) {
     this._assertNotDisposed()
@@ -623,6 +870,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
         const client = await StargateClient.connect(endpoint)
         return await client.broadcastTx(transactionBytes)
       })
+      assertDelivered(result, 'transaction')
 
       return {
         hash: result.transactionHash,
@@ -630,33 +878,25 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
       }
     }
 
-    const cosmosTransaction = this._toCosmosTransaction(
+    const { messages, memo, fee, totalFee } = await this._prepareTransaction(
       /** @type {Transaction} */ (transaction)
     )
-    const fee = this._buildTransferFee()
-    const transactionFee = BigInt(fee.amount[0].amount)
-    this._assertTransactionFeeWithinLimit(transactionFee)
+    this._assertTransactionFeeWithinLimit(totalFee)
 
-    const senderAddress = await this.getAddress()
+    const address = await this.getAddress()
 
     const result = await this._withFallback(endpoints, async endpoint => {
       const client = await SigningStargateClient.connectWithSigner(
         endpoint,
         this._signer
       )
-
-      return client.sendTokens(
-        senderAddress,
-        cosmosTransaction.to,
-        cosmosTransaction.amount,
-        fee,
-        cosmosTransaction.memo
-      )
+      return client.signAndBroadcast(address, messages, fee, memo)
     })
+    assertDelivered(result, 'transaction')
 
     return {
       hash: result.transactionHash,
-      fee: transactionFee,
+      fee: totalFee,
     }
   }
 

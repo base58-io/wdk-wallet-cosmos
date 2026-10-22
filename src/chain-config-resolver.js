@@ -3,6 +3,8 @@
 import { ValueError } from '@tetherto/wdk-wallet'
 import { chains } from 'chain-registry'
 
+const DEFAULT_GAS_ADJUSTMENT = 1.3
+
 /**
  * @param {string[] | undefined} rpcEndpoints
  * @param {{ address?: string }[] | undefined} registryEndpoints
@@ -21,6 +23,20 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
 }
 
 /**
+ * Validates the configured gas adjustment, falling back to the default.
+ *
+ * @param {number | undefined} gasAdjustment
+ * @returns {number}
+ * @throws {ValueError} If the gas adjustment is not a positive finite number.
+ */
+function resolveGasAdjustment(gasAdjustment = DEFAULT_GAS_ADJUSTMENT) {
+  if (!Number.isFinite(gasAdjustment) || gasAdjustment <= 0) {
+    throw new ValueError('gasAdjustment must be a positive finite number.')
+  }
+  return gasAdjustment
+}
+
+/**
  * @typedef {Object} CosmosWalletConfig
  * @property {string} [chainName] - The chain name from chain-registry (e.g. 'juno', 'osmosis').
  * @property {string[]} [rpcEndpoints] - Array of RPC endpoint URLs for fallback support.
@@ -30,6 +46,7 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
  * @property {string} [nativeDenom] - The native token denomination (overrides registry, default: 'uatom').
  * @property {number} [coinType] - The BIP-44 coin type (overrides registry, default: 118).
  * @property {string} [gasPrice] - The gas price with denom (e.g. '0.025uatom').
+ * @property {number} [gasAdjustment] - The multiplier applied to simulated gas usage to set the gas limit (default: 1.3).
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
@@ -45,6 +62,7 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
  * @property {number} coinType - The BIP-44 coin type.
  * @property {string} [gasPrice] - The gas price with denom.
  * @property {{ low: number, average: number, high: number, denom: string }} [gasPriceStep] - Gas price tiers from chain-registry fee token metadata.
+ * @property {number} gasAdjustment - The multiplier applied to simulated gas usage to set the gas limit.
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {string} [chainId] - The chain ID (from registry).
@@ -57,7 +75,7 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
  *
  * @param {CosmosWalletConfig} config - The wallet configuration.
  * @returns {ResolvedChainConfig} The resolved chain configuration.
- * @throws {ValueError} If chainName is provided but not found in registry.
+ * @throws {ValueError} If chainName is provided but not found in registry, or gasAdjustment is invalid.
  *
  * @example
  * // Auto-config from registry
@@ -79,6 +97,8 @@ function buildRpcEndpoints(rpcEndpoints, registryEndpoints) {
  * });
  */
 export function resolveChainConfig(config = {}) {
+  const gasAdjustment = resolveGasAdjustment(config.gasAdjustment)
+
   if (!config.chainName) {
     const endpoints = buildRpcEndpoints(config.rpcEndpoints, undefined)
     return {
@@ -89,6 +109,7 @@ export function resolveChainConfig(config = {}) {
       nativeDenom: config.nativeDenom || 'uatom',
       coinType: config.coinType ?? 118,
       gasPrice: config.gasPrice,
+      gasAdjustment,
       transferMaxFee: config.transferMaxFee,
       transactionMaxFee: config.transactionMaxFee,
       ibcChannels: config.ibcChannels,
@@ -147,6 +168,7 @@ export function resolveChainConfig(config = {}) {
     coinType: config.coinType ?? chainData.slip44 ?? 118,
     gasPrice: config.gasPrice || defaultGasPrice,
     gasPriceStep: defaultGasPriceStep,
+    gasAdjustment,
     transferMaxFee: config.transferMaxFee,
     transactionMaxFee: config.transactionMaxFee,
     ibcChannels: config.ibcChannels,
