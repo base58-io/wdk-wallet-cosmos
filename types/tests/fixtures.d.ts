@@ -3,10 +3,8 @@ export declare const IBC_CHAIN_1_CONFIG: {
     addressPrefix: string;
     nativeDenom: string;
     gasPrice: string;
-    ibcChannels: {
-        wdk2: {
-            sourceChannel: string;
-        };
+    ibcChains: {
+        wdk2: string;
     };
 };
 export declare const IBC_CHAIN_2_CONFIG: {
@@ -14,10 +12,8 @@ export declare const IBC_CHAIN_2_CONFIG: {
     addressPrefix: string;
     nativeDenom: string;
     gasPrice: string;
-    ibcChannels: {
-        wdk: {
-            sourceChannel: string;
-        };
+    ibcChains: {
+        wdk: string;
     };
 };
 export declare const ALICE_MNEMONIC = "car knock victory oval pulse practice draw bulb fiction bulb involve dumb stairs discover update spatial blouse perfect match property wheat defense host fortune";

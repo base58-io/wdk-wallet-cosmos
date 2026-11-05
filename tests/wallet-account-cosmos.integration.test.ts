@@ -5,7 +5,10 @@
  * offline lives in wallet-account-cosmos.test.ts instead.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import WalletManagerCosmos, { WalletAccountCosmos } from '../index.js'
+import WalletManagerCosmos, {
+  WalletAccountCosmos,
+  WalletAccountCosmosReadOnly,
+} from '../index.js'
 import { calculateFeeAmountFromGasPrice } from '../src/gas-fee-utils.js'
 import {
   ALICE_ADDRESS,
@@ -17,6 +20,23 @@ import {
   IBC_CHAIN_2_CONFIG,
   resolveIbcDenom,
 } from './fixtures.js'
+
+/**
+ * Polls `read` until it returns something other than `previous`: an IBC
+ * transfer lands on the destination chain a few blocks after it is sent.
+ */
+async function waitForChange(
+  read: () => Promise<bigint>,
+  previous: bigint,
+  timeout = 60_000
+): Promise<bigint> {
+  const deadline = Date.now() + timeout
+  for (;;) {
+    const value = await read()
+    if (value !== previous || Date.now() > deadline) return value
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+}
 
 describe('WalletAccountCosmos (chain-backed)', () => {
   let aliceWallet: InstanceType<typeof WalletManagerCosmos>
@@ -95,6 +115,39 @@ describe('WalletAccountCosmos (chain-backed)', () => {
     })
   })
 
+  describe('getIbcChannels', () => {
+    it('should derive the open channel and the chain it leads to on both chains', async () => {
+      const chain1 = WalletAccountCosmosReadOnly.fromAddress(
+        ALICE_ADDRESS,
+        IBC_CHAIN_1_CONFIG
+      )
+      const chain2 = WalletAccountCosmosReadOnly.fromAddress(
+        BOB_ADDRESS_CHAIN_2,
+        IBC_CHAIN_2_CONFIG
+      )
+
+      const [chain1Channels, chain2Channels] = await Promise.all([
+        chain1.getIbcChannels(),
+        chain2.getIbcChannels(),
+      ])
+
+      expect(chain1Channels).toEqual([
+        {
+          channelId: 'channel-0',
+          counterpartyChannelId: 'channel-0',
+          counterpartyChainId: 'wdkdev2',
+        },
+      ])
+      expect(chain2Channels).toEqual([
+        {
+          channelId: 'channel-0',
+          counterpartyChannelId: 'channel-0',
+          counterpartyChainId: 'wdkdev',
+        },
+      ])
+    })
+  })
+
   describe('transfer', () => {
     it('should transfer tokens', async () => {
       const aliceBalanceBefore = await aliceAccount.getBalance('token')
@@ -140,7 +193,7 @@ describe('WalletAccountCosmos (chain-backed)', () => {
       expect(balanceBefore - balanceAfter).toBe(transfer.fee)
     })
 
-    it('should transfer native stake from wdkdev (wdk) to wdkdev2 (wdk2) via IBC', async () => {
+    it('should transfer native stake to wdkdev2 and back over the derived channel', async () => {
       const chain1AliceWallet = new WalletManagerCosmos(
         ALICE_MNEMONIC,
         IBC_CHAIN_1_CONFIG
@@ -160,36 +213,50 @@ describe('WalletAccountCosmos (chain-backed)', () => {
         expect(aliceAddress).toBe(ALICE_ADDRESS)
         expect(bobAddress).toBe(BOB_ADDRESS_CHAIN_2)
 
-        const baseDenom = 'stake'
-        const sourceChannel = IBC_CHAIN_1_CONFIG.ibcChannels.wdk2.sourceChannel
-        const destinationIbcDenom = resolveIbcDenom(sourceChannel, baseDenom)
-
-        const bobIbcBalanceBefore =
-          await chain2BobAccount.getBalance(destinationIbcDenom)
-
+        // The voucher's denom is named after the channel on the receiving side.
+        const [channel] = await chain1AliceAccount.getIbcChannels()
+        const voucherDenom = resolveIbcDenom(
+          channel.counterpartyChannelId,
+          'stake'
+        )
         const transferAmount = 1000
+
+        const bobVoucherBefore = await chain2BobAccount.getBalance(voucherDenom)
         const transferResult = await chain1AliceAccount.transfer({
-          token: baseDenom,
+          token: 'stake',
           recipient: bobAddress,
           amount: transferAmount,
         })
 
-        expect(transferResult.hash).toBeTypeOf('string')
-        expect(transferResult.hash.length).toBeGreaterThan(0)
         expect(transferResult.fee).toBeGreaterThan(BigInt(0))
-
         const receipt = await chain1AliceAccount.getTransaction(
           transferResult.hash
         )
         expect(receipt.success).toBe(true)
         expect(receipt.fee).toBe(transferResult.fee)
 
-        const bobIbcBalanceAfter =
-          await chain2BobAccount.getBalance(destinationIbcDenom)
-
-        expect(bobIbcBalanceAfter - bobIbcBalanceBefore).toBe(
-          BigInt(transferAmount)
+        const bobVoucherAfter = await waitForChange(
+          () => chain2BobAccount.getBalance(voucherDenom),
+          bobVoucherBefore
         )
+        expect(bobVoucherAfter - bobVoucherBefore).toBe(BigInt(transferAmount))
+
+        // Sending the voucher back routes through ibcChains' `wdk` entry.
+        const aliceStakeBefore = await chain1AliceAccount.getBalance('stake')
+        const returnResult = await chain2BobAccount.transfer({
+          token: voucherDenom,
+          recipient: aliceAddress,
+          amount: transferAmount,
+        })
+        expect(
+          (await chain2BobAccount.getTransaction(returnResult.hash)).success
+        ).toBe(true)
+
+        const aliceStakeAfter = await waitForChange(
+          () => chain1AliceAccount.getBalance('stake'),
+          aliceStakeBefore
+        )
+        expect(aliceStakeAfter - aliceStakeBefore).toBe(BigInt(transferAmount))
       } finally {
         chain1AliceWallet.dispose()
         chain2BobWallet.dispose()

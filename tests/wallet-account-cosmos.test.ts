@@ -23,12 +23,17 @@ import {
   type EncodeObject,
 } from '@cosmjs/proto-signing'
 import {
+  QueryClient,
   SigningStargateClient,
   StargateClient,
   defaultRegistryTypes,
+  setupIbcExtension,
 } from '@cosmjs/stargate'
 import { connectComet } from '@cosmjs/tendermint-rpc'
+import { fromBech32, toBech32 } from '@cosmjs/encoding'
 import { ServiceClientImpl } from 'cosmjs-types/cosmos/tx/v1beta1/service'
+import { State as ChannelState } from 'cosmjs-types/ibc/core/channel/v1/channel'
+import { ClientState as TendermintClientState } from 'cosmjs-types/ibc/lightclients/tendermint/v1/tendermint'
 import {
   DisposalError,
   MaximumFeeExceededError,
@@ -63,6 +68,11 @@ import {
 vi.mock('@cosmjs/tendermint-rpc', async importOriginal => ({
   ...(await importOriginal<typeof import('@cosmjs/tendermint-rpc')>()),
   connectComet: vi.fn(),
+}))
+
+vi.mock('@cosmjs/stargate', async importOriginal => ({
+  ...(await importOriginal<typeof import('@cosmjs/stargate')>()),
+  setupIbcExtension: vi.fn(),
 }))
 
 // A caller-supplied memo, expected to replace the default on transfers.
@@ -100,6 +110,81 @@ function expectSimulated(
   )
   expect(tx.body?.memo).toBe(memo)
   expect(tx.authInfo?.fee?.amount).toEqual([{ denom: 'stake', amount: '1' }])
+}
+
+/** Builds an `IdentifiedChannel` as the chain's Channels query returns it. */
+function createChannel(
+  channelId: string,
+  {
+    state = ChannelState.STATE_OPEN,
+    portId = 'transfer',
+    counterpartyChannelId = 'channel-0',
+  } = {}
+) {
+  return {
+    state,
+    ordering: 1,
+    counterparty: { portId, channelId: counterpartyChannelId },
+    connectionHops: ['connection-0'],
+    version: 'ics20-1',
+    portId,
+    channelId,
+  }
+}
+
+/**
+ * Builds the IBC query stub, with a Tendermint light client per channel in
+ * `chainIds` (keyed by channel id). A channel missing from it has a solo
+ * machine client, which carries no chain id.
+ */
+function createIbcQueries(
+  channels: ReturnType<typeof createChannel>[],
+  chainIds: Record<string, string>,
+  denomTrace = vi.fn()
+) {
+  const clientState = vi.fn(async (_portId: string, channelId: string) => ({
+    identifiedClientState: {
+      clientId: `07-tendermint-${channelId}`,
+      clientState:
+        channelId in chainIds
+          ? {
+              typeUrl: '/ibc.lightclients.tendermint.v1.ClientState',
+              value: TendermintClientState.encode(
+                TendermintClientState.fromPartial({
+                  chainId: chainIds[channelId],
+                })
+              ).finish(),
+            }
+          : {
+              typeUrl: '/ibc.lightclients.solomachine.v3.ClientState',
+              value: new Uint8Array(),
+            },
+    },
+  }))
+
+  return {
+    channel: {
+      allChannels: vi.fn().mockResolvedValue({ channels }),
+      clientState,
+    },
+    transfer: { denomTrace },
+  }
+}
+
+/** Runs `operation` with the chain's IBC queries stubbed to `ibc`. */
+async function withStubbedIbc<T>(
+  ibc: ReturnType<typeof createIbcQueries>,
+  operation: () => Promise<T>
+): Promise<T> {
+  vi.mocked(connectComet).mockResolvedValue({} as never)
+  vi.mocked(setupIbcExtension).mockReturnValue({ ibc } as never)
+
+  try {
+    return await operation()
+  } finally {
+    vi.mocked(connectComet).mockReset()
+    vi.mocked(setupIbcExtension).mockReset()
+  }
 }
 
 function createSignedTransaction(fee: string): TxRaw {
@@ -563,6 +648,19 @@ describe('WalletAccountCosmos', () => {
   })
 
   describe('transfer', () => {
+    // channel-7, not channel-0, so a hardcoded channel would show.
+    const WDKDEV2_CHANNEL = {
+      channelId: 'channel-7',
+      counterpartyChannelId: 'channel-3',
+      counterpartyChainId: 'wdkdev2',
+    }
+
+    beforeEach(() => {
+      vi.spyOn(aliceAccount, 'getIbcChannels').mockResolvedValue([
+        WDKDEV2_CHANNEL,
+      ])
+    })
+
     it('should throw if RPC endpoint is not configured', async () => {
       const accountWithoutRpc = await WalletAccountCosmos.create(
         ALICE_MNEMONIC,
@@ -662,6 +760,132 @@ describe('WalletAccountCosmos', () => {
       expect(messages[0].typeUrl).toBe(
         '/ibc.applications.transfer.v1.MsgTransfer'
       )
+      expect(messages[0].value.sourceChannel).toBe(WDKDEV2_CHANNEL.channelId)
+    })
+
+    it('should route a prefix chain-registry knows over the channel to its chain', async () => {
+      // `osmo` is both osmosis-1 and osmo-test-5 in the registry; only the
+      // open channel tells them apart.
+      vi.mocked(aliceAccount.getIbcChannels).mockResolvedValue([
+        WDKDEV2_CHANNEL,
+        {
+          channelId: 'channel-2',
+          counterpartyChannelId: 'channel-9',
+          counterpartyChainId: 'osmosis-1',
+        },
+      ])
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
+
+      await withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        () =>
+          aliceAccount.transfer({
+            token: 'stake',
+            recipient: toBech32('osmo', fromBech32(BOB_ADDRESS).data),
+            amount: 1000,
+          })
+      )
+
+      expect(signAndBroadcast.mock.calls[0][1][0].value.sourceChannel).toBe(
+        'channel-2'
+      )
+    })
+
+    it('should reject a prefix no chain is known for, without querying channels', async () => {
+      await expect(
+        aliceAccount.transfer({
+          token: 'stake',
+          recipient: toBech32('nochain', fromBech32(BOB_ADDRESS).data),
+          amount: 1000,
+        })
+      ).rejects.toThrow(
+        new ValueError(
+          'No chain is known for the Bech32 prefix "nochain". Map it to a chain id in the ibcChains config.'
+        )
+      )
+      expect(aliceAccount.getIbcChannels).not.toHaveBeenCalled()
+    })
+
+    it('should reject a chain no open channel leads to', async () => {
+      vi.mocked(aliceAccount.getIbcChannels).mockResolvedValue([])
+
+      await expect(
+        aliceAccount.transfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS_CHAIN_2,
+          amount: 1000,
+        })
+      ).rejects.toThrow(
+        new ValueError(
+          'No IBC transfer channel leads to wdkdev2 (Bech32 prefix "wdk2").'
+        )
+      )
+    })
+
+    it('should reject a chain several open channels lead to', async () => {
+      vi.mocked(aliceAccount.getIbcChannels).mockResolvedValue([
+        WDKDEV2_CHANNEL,
+        { ...WDKDEV2_CHANNEL, channelId: 'channel-8' },
+      ])
+
+      await expect(
+        aliceAccount.transfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS_CHAIN_2,
+          amount: 1000,
+        })
+      ).rejects.toThrow(
+        new ValueError(
+          'Several IBC transfer channels lead to Bech32 prefix "wdk2": channel-7 (wdkdev2), channel-8 (wdkdev2)'
+        )
+      )
+    })
+
+    it('should route a chain-registry chain over the channel the registry prefers', async () => {
+      // cosmoshub-4 reaches sentinelhub-2 over channel-186 and channel-1549;
+      // the registry prefers channel-1549.
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        chainName: 'cosmoshub',
+        rpcEndpoints: ['http://localhost:26657'],
+      })
+      const account = await wallet.getAccount(0)
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
+
+      await withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        () =>
+          account.transfer({
+            token: 'uatom',
+            recipient: toBech32('sent', fromBech32(BOB_ADDRESS).data),
+            amount: 1000,
+          })
+      )
+
+      expect(signAndBroadcast.mock.calls[0][1][0].value.sourceChannel).toBe(
+        'channel-1549'
+      )
+      expect(setupIbcExtension).not.toHaveBeenCalled()
+      wallet.dispose()
+    })
+
+    it('should route a read-only quote over the live channels too', async () => {
+      const readOnlyAccount = WalletAccountCosmosReadOnly.fromAddress(
+        ALICE_ADDRESS,
+        IBC_CHAIN_1_CONFIG
+      )
+      vi.spyOn(readOnlyAccount, 'getIbcChannels').mockResolvedValue([])
+
+      await expect(
+        readOnlyAccount.quoteTransfer({
+          token: 'stake',
+          recipient: BOB_ADDRESS_CHAIN_2,
+          amount: 1000,
+        })
+      ).rejects.toThrow(ValueError)
     })
 
     it('should enforce transferMaxFee against the simulated fee', async () => {
@@ -825,6 +1049,101 @@ describe('WalletAccountCosmos', () => {
 
       expect(messages[0].value.memo).toBe('Transfer via WDK (IBC)')
       expect(txMemo).toBe('Transfer via WDK (IBC)')
+    })
+  })
+
+  describe('getIbcChannels', () => {
+    it('should read a chain-registry chain from the registry, without querying it', async () => {
+      const wallet = new WalletManagerCosmos(ALICE_MNEMONIC, {
+        chainName: 'cosmoshub',
+      })
+      const account = await wallet.getAccount(0)
+
+      const channels = await account.getIbcChannels()
+
+      expect(channels).toContainEqual({
+        channelId: 'channel-141',
+        counterpartyChannelId: 'channel-0',
+        counterpartyChainId: 'osmosis-1',
+      })
+      expect(
+        channels.filter(
+          channel => channel.counterpartyChainId === 'sentinelhub-2'
+        )
+      ).toEqual([
+        {
+          channelId: 'channel-1549',
+          counterpartyChannelId: 'channel-97',
+          counterpartyChainId: 'sentinelhub-2',
+        },
+      ])
+      expect(connectComet).not.toHaveBeenCalled()
+      wallet.dispose()
+    })
+
+    it('should list open transfer channels with the chain each leads to', async () => {
+      const ibc = createIbcQueries(
+        [
+          createChannel('channel-0', { counterpartyChannelId: 'channel-5' }),
+          createChannel('channel-1', { state: ChannelState.STATE_CLOSED }),
+          createChannel('channel-2', { portId: 'icahost' }),
+          createChannel('channel-3'),
+          createChannel('channel-4', { counterpartyChannelId: 'channel-9' }),
+        ],
+        {
+          'channel-0': 'wdkdev2',
+          'channel-1': 'wdkdev2',
+          'channel-2': 'wdkdev2',
+          'channel-4': 'osmosis-1',
+        }
+      )
+
+      const channels = await withStubbedIbc(ibc, () =>
+        aliceAccount.getIbcChannels()
+      )
+
+      // channel-3's solo machine client has no chain id to route by.
+      expect(channels).toEqual([
+        {
+          channelId: 'channel-0',
+          counterpartyChannelId: 'channel-5',
+          counterpartyChainId: 'wdkdev2',
+        },
+        {
+          channelId: 'channel-4',
+          counterpartyChannelId: 'channel-9',
+          counterpartyChainId: 'osmosis-1',
+        },
+      ])
+    })
+
+    it('should query the chain once per account', async () => {
+      const ibc = createIbcQueries([createChannel('channel-0')], {
+        'channel-0': 'wdkdev2',
+      })
+
+      await withStubbedIbc(ibc, async () => {
+        await aliceAccount.getIbcChannels()
+        await aliceAccount.getIbcChannels()
+      })
+
+      expect(ibc.channel.allChannels).toHaveBeenCalledOnce()
+    })
+
+    it('should query the chain again after a failed query', async () => {
+      const ibc = createIbcQueries([createChannel('channel-0')], {
+        'channel-0': 'wdkdev2',
+      })
+      ibc.channel.allChannels.mockRejectedValueOnce(
+        new Error('Query failed with (6): unknown query path')
+      )
+
+      await withStubbedIbc(ibc, async () => {
+        await expect(aliceAccount.getIbcChannels()).rejects.toThrow(
+          'unknown query path'
+        )
+        await expect(aliceAccount.getIbcChannels()).resolves.toHaveLength(1)
+      })
     })
   })
 

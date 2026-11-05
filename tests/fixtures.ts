@@ -9,11 +9,7 @@ export const IBC_CHAIN_1_CONFIG = {
   addressPrefix: 'wdk',
   nativeDenom: 'stake',
   gasPrice: '0.025stake',
-  ibcChannels: {
-    wdk2: {
-      sourceChannel: 'channel-0',
-    },
-  },
+  ibcChains: { wdk2: 'wdkdev2' },
 }
 
 export const IBC_CHAIN_2_CONFIG = {
@@ -21,11 +17,7 @@ export const IBC_CHAIN_2_CONFIG = {
   addressPrefix: 'wdk2',
   nativeDenom: 'stake',
   gasPrice: '0.025stake',
-  ibcChannels: {
-    wdk: {
-      sourceChannel: 'channel-0',
-    },
-  },
+  ibcChains: { wdk: 'wdkdev' },
 }
 
 // Alice mnemonic from Ignite output (for local/dev use only)
