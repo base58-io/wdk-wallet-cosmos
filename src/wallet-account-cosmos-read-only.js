@@ -12,6 +12,7 @@ import { decodeTxRaw } from '@cosmjs/proto-signing'
 import {
   QueryClient,
   StargateClient,
+  createProtobufRpcClient,
   setupIbcExtension,
 } from '@cosmjs/stargate'
 import { connectComet } from '@cosmjs/tendermint-rpc'
@@ -26,6 +27,7 @@ import {
 import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import { State as ChannelState } from 'cosmjs-types/ibc/core/channel/v1/channel'
 import { ClientState as TendermintClientState } from 'cosmjs-types/ibc/lightclients/tendermint/v1/tendermint'
+import { QueryClientImpl as LegacyTransferQuery } from 'cosmjs-types-ibc-v8/ibc/applications/transfer/v1/query.js'
 import {
   getChainIdsForPrefix,
   getRegistryIbcChannels,
@@ -65,6 +67,15 @@ import { withFallback } from './rpc-fallback.js'
  * @property {string} counterpartyChainId - The chain id the channel leads to.
  */
 
+/**
+ * Where an `ibc/<hash>` denom came from.
+ *
+ * @typedef {Object} DenomTrace
+ * @property {string} baseDenom - The denom on the chain the token is native to (e.g. `uatom`).
+ * @property {{ portId: string, channelId: string }[]} path - The hops the token took, most recent first: `path[0]` is the channel on this chain it arrived through.
+ * @property {string} [sourceChainId] - The chain the token arrived from: the counterparty of `path[0]`. For a single-hop token, the chain it is native to. Unset if that channel's light client is not Tendermint.
+ */
+
 // CometBFT chains produce blocks roughly every 6 seconds.
 const BLOCK_TIME = 6000
 
@@ -72,6 +83,12 @@ const TRANSFER_PORT = 'transfer'
 
 const TENDERMINT_CLIENT_STATE_TYPE_URL =
   '/ibc.lightclients.tendermint.v1.ClientState'
+
+const IBC_DENOM_PREFIX = 'ibc/'
+
+// Cosmos SDK's answer to a query it has no handler for. cosmjs puts it in the
+// thrown error's message only: "Query failed with (6): unknown query path: ...".
+const UNKNOWN_QUERY_PATH = 'unknown query path'
 
 const TEXT_ENCODER = new TextEncoder()
 
@@ -138,6 +155,40 @@ async function connectIbc(endpoint) {
 }
 
 /**
+ * Queries a denom's trace as `{ base, trace }`. cosmjs asks for it through the
+ * `Denom` query of ibc-go v10; chains on ibc-go v8 and older (e.g. Osmosis)
+ * do not serve it and answer the `DenomTrace` query instead, sent here with
+ * the cosmjs-types release generated from ibc-go v8.
+ *
+ * @param {QueryClient} client - The raw query client.
+ * @param {IbcQueries} ibc - Its IBC queries.
+ * @param {string} hash - The hash of an `ibc/<hash>` denom.
+ * @returns {Promise<{ base: string, trace: { portId: string, channelId: string }[] } | undefined>} The trace, or undefined if the chain returned none.
+ */
+async function queryDenom(client, ibc, hash) {
+  try {
+    return (await ibc.transfer.denomTrace(hash)).denom
+  } catch (error) {
+    if (!(error instanceof Error && error.message.includes(UNKNOWN_QUERY_PATH))) {
+      throw error
+    }
+  }
+
+  const { denomTrace } = await new LegacyTransferQuery(
+    createProtobufRpcClient(client)
+  ).DenomTrace({ hash })
+  if (!denomTrace) return undefined
+
+  // `path` is `port/channel` pairs, most recent hop first: `transfer/channel-0/transfer/channel-5`.
+  const segments = denomTrace.path ? denomTrace.path.split('/') : []
+  const trace = []
+  for (let i = 0; i + 1 < segments.length; i += 2) {
+    trace.push({ portId: segments[i], channelId: segments[i + 1] })
+  }
+  return { base: denomTrace.baseDenom, trace }
+}
+
+/**
  * Reads the counterparty chain id from a channel's light client.
  *
  * @param {IbcQueries} ibc - The IBC queries.
@@ -198,6 +249,13 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      */
     this._ibcChannels = undefined
 
+    /**
+     * Resolved denom traces, keyed by denom. A trace never changes.
+     *
+     * @private
+     * @type {Map<string, Promise<DenomTrace>>}
+     */
+    this._denomTraces = new Map()
   }
 
   /**
@@ -453,6 +511,62 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
     }
 
     return await this._ibcChannels
+  }
+
+  /**
+   * Returns where an `ibc/<hash>` denom came from, or null for a denom native
+   * to this chain (anything without the `ibc/` prefix).
+   *
+   * Traces never change, so each denom is queried once per account.
+   *
+   * @param {string} denom - The denom, e.g. `ibc/27394FB0...` or `uatom`.
+   * @returns {Promise<DenomTrace | null>} The trace, or null for a native denom.
+   * @throws {ProviderRequiredError} If no RPC endpoint is configured.
+   * @throws {Error} If the chain does not know the denom's hash.
+   */
+  async getDenomTrace(denom) {
+    this._assertNotDisposed()
+
+    if (!denom.startsWith(IBC_DENOM_PREFIX)) {
+      return null
+    }
+
+    const endpoints = this._assertRpcEndpoints('query IBC denoms')
+
+    let trace = this._denomTraces.get(denom)
+    if (!trace) {
+      trace = this._withFallback(endpoints, async endpoint => {
+        const { client, ibc } = await connectIbc(endpoint)
+        const response = await queryDenom(
+          client,
+          ibc,
+          denom.slice(IBC_DENOM_PREFIX.length)
+        )
+        if (!response) {
+          throw new Error(`The chain returned no trace for ${denom}.`)
+        }
+
+        const path = response.trace.map(({ portId, channelId }) => ({
+          portId,
+          channelId,
+        }))
+        const sourceChainId = path[0]
+          ? await queryCounterpartyChainId(
+              ibc,
+              path[0].portId,
+              path[0].channelId
+            )
+          : undefined
+
+        return { baseDenom: response.base, path, sourceChainId }
+      })
+      this._denomTraces.set(denom, trace)
+      trace.catch(() => {
+        this._denomTraces.delete(denom)
+      })
+    }
+
+    return await trace
   }
 
   /**

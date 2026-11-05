@@ -27,6 +27,23 @@ export type IbcChannel = {
      */
     counterpartyChainId: string;
 };
+export type DenomTrace = {
+    /**
+     * - The denom on the chain the token is native to (e.g. `uatom`).
+     */
+    baseDenom: string;
+    /**
+     * - The hops the token took, most recent first: `path[0]` is the channel on this chain it arrived through.
+     */
+    path: {
+        portId: string;
+        channelId: string;
+    }[];
+    /**
+     * - The chain the token arrived from: the counterparty of `path[0]`. For a single-hop token, the chain it is native to. Unset if that channel's light client is not Tendermint.
+     */
+    sourceChainId?: string;
+};
 /**
  * A Cosmos wallet account without key material.
  *
@@ -56,6 +73,13 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @type {Promise<IbcChannel[]> | undefined}
      */
     _ibcChannels;
+    /**
+     * Resolved denom traces, keyed by denom. A trace never changes.
+     *
+     * @private
+     * @type {Map<string, Promise<DenomTrace>>}
+     */
+    _denomTraces;
     /**
      * Creates a read-only account.
      *
@@ -171,6 +195,18 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @throws {ProviderRequiredError} If the chain is not configured by `chainName` and no RPC endpoint is configured.
      */
     getIbcChannels(): Promise<IbcChannel[]>;
+    /**
+     * Returns where an `ibc/<hash>` denom came from, or null for a denom native
+     * to this chain (anything without the `ibc/` prefix).
+     *
+     * Traces never change, so each denom is queried once per account.
+     *
+     * @param {string} denom - The denom, e.g. `ibc/27394FB0...` or `uatom`.
+     * @returns {Promise<DenomTrace | null>} The trace, or null for a native denom.
+     * @throws {ProviderRequiredError} If no RPC endpoint is configured.
+     * @throws {Error} If the chain does not know the denom's hash.
+     */
+    getDenomTrace(denom: string): Promise<DenomTrace | null>;
     /**
      * Returns the open transfer channel leading to the chain behind a Bech32
      * prefix. The prefix resolves to candidate chain ids through `ibcChains`
