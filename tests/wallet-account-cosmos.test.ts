@@ -182,7 +182,7 @@ async function withStubbedIbc<T>(
   ibc: ReturnType<typeof createIbcQueries>,
   operation: () => Promise<T>
 ): Promise<T> {
-  vi.mocked(connectComet).mockResolvedValue({} as never)
+  vi.mocked(connectComet).mockResolvedValue({ disconnect: vi.fn() } as never)
   vi.mocked(setupIbcExtension).mockReturnValue({ ibc } as never)
 
   try {
@@ -228,36 +228,39 @@ function createIndexedTx(overrides: Record<string, unknown> = {}) {
   }
 }
 
-/** Runs `operation` with `StargateClient.connect` stubbed to return `client`. */
+/** Runs `operation` with `StargateClient.create` stubbed to return `client`. */
 async function withStubbedClient<T>(
   client: Record<string, unknown>,
   operation: () => Promise<T>
 ): Promise<T> {
-  const connect = vi
-    .spyOn(StargateClient, 'connect')
-    .mockResolvedValue(client as never)
+  vi.mocked(connectComet).mockResolvedValue({ disconnect: vi.fn() } as never)
+  const create = vi
+    .spyOn(StargateClient, 'create')
+    .mockReturnValue(client as never)
 
   try {
     return await operation()
   } finally {
-    connect.mockRestore()
+    vi.mocked(connectComet).mockReset()
+    create.mockRestore()
   }
 }
 
 /**
- * Runs `operation` with `SigningStargateClient.connectWithSigner` stubbed to
+ * Runs `operation` with `SigningStargateClient.createWithSigner` stubbed to
  * return `client`, so signing paths can be inspected without a chain. The
- * simulation's Comet connection and sequence lookup are stubbed too, and the
- * chain's Simulate query resolves with the gas used `client.simulate` reports.
+ * Comet connection and the simulation's sequence lookup are stubbed too, and
+ * the chain's Simulate query resolves with the gas used `client.simulate`
+ * reports.
  */
 async function withStubbedSigningClient<T>(
   { simulate, ...client }: Record<string, unknown> & { simulate?: Mock },
   operation: () => Promise<T>
 ): Promise<T> {
-  const connectWithSigner = vi
-    .spyOn(SigningStargateClient, 'connectWithSigner')
-    .mockResolvedValue(client as never)
-  vi.mocked(connectComet).mockResolvedValue({} as never)
+  const createWithSigner = vi
+    .spyOn(SigningStargateClient, 'createWithSigner')
+    .mockReturnValue(client as never)
+  vi.mocked(connectComet).mockResolvedValue({ disconnect: vi.fn() } as never)
   const createClient = vi.spyOn(StargateClient, 'create').mockReturnValue({
     getSequence: vi.fn().mockResolvedValue({ accountNumber: 0, sequence: 0 }),
   } as never)
@@ -273,7 +276,7 @@ async function withStubbedSigningClient<T>(
   try {
     return await operation()
   } finally {
-    connectWithSigner.mockRestore()
+    createWithSigner.mockRestore()
     vi.mocked(connectComet).mockReset()
     createClient.mockRestore()
     simulateQuery.mockRestore()
@@ -1366,18 +1369,53 @@ describe('WalletAccountCosmos', () => {
         transactionMaxFee: 100,
       })
       const account = await wallet.getAccount(0)
-      const connect = vi.spyOn(StargateClient, 'connect')
 
       try {
         await expect(
           account.sendTransaction(createSignedTransaction('123'))
         ).rejects.toThrow(MaximumFeeExceededError)
 
-        expect(connect).not.toHaveBeenCalled()
+        expect(connectComet).not.toHaveBeenCalled()
       } finally {
-        connect.mockRestore()
         wallet.dispose()
       }
+    })
+  })
+
+  describe('RPC clients', () => {
+    it('should connect to an endpoint once and disconnect on dispose', async () => {
+      const signAndBroadcast = vi
+        .fn()
+        .mockResolvedValue({ code: 0, transactionHash: 'HASH' })
+      const options = { token: 'stake', recipient: BOB_ADDRESS, amount: 1000 }
+
+      await withStubbedSigningClient(
+        { simulate: simulating(), signAndBroadcast },
+        async () => {
+          await aliceAccount.transfer(options)
+          await aliceAccount.transfer(options)
+
+          expect(connectComet).toHaveBeenCalledOnce()
+          expect(SigningStargateClient.createWithSigner).toHaveBeenCalledOnce()
+
+          const comet = await vi.mocked(connectComet).mock.results[0].value
+          aliceAccount.dispose()
+          await vi.waitFor(() => expect(comet.disconnect).toHaveBeenCalledOnce())
+        }
+      )
+    })
+
+    it('should connect again after a failed connection', async () => {
+      const getBalance = vi
+        .fn()
+        .mockResolvedValue({ denom: 'stake', amount: '5' })
+
+      await withStubbedClient({ getBalance }, async () => {
+        vi.mocked(connectComet).mockRejectedValueOnce(new Error('fetch failed'))
+
+        await expect(aliceAccount.getBalance()).resolves.toBe(BigInt(5))
+        expect(connectComet).toHaveBeenCalledTimes(2)
+      })
     })
   })
 
