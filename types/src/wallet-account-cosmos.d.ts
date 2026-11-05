@@ -132,6 +132,14 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      */
     _disposed: boolean;
     /**
+     * Signing clients, keyed by RPC endpoint. A client fetches the chain id
+     * on its first signature and keeps it.
+     *
+     * @private
+     * @type {Map<string, Promise<SigningStargateClient>>}
+     */
+    _signingClients;
+    /**
      * Creates an account backed by a Cosmos signer.
      *
      * @param {ISignerCosmos} signer - The initialized Cosmos signer.
@@ -139,6 +147,15 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
      * @param {boolean} [shouldWipeSignerOnDisposal] - If true, the account owns the signer and disposes it in {@link dispose}.
      */
     constructor(signer: ISignerCosmos, resolvedConfig: ResolvedChainConfig, shouldWipeSignerOnDisposal?: boolean);
+    /**
+     * Returns the account's signing client for an RPC endpoint, over the
+     * endpoint's CometBFT client.
+     *
+     * @private
+     * @param {string} endpoint - The RPC endpoint.
+     * @returns {Promise<SigningStargateClient>} The signing client.
+     */
+    private _getSigningClient;
     /**
      * Creates a new Cosmos wallet account.
      *
@@ -382,6 +399,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly imp
     /**
      * Disposes the wallet account. After calling this method, the account can no longer be used.
      * The signer is disposed, securely erasing its key material, only if the account owns it.
+     * The account's RPC clients are disconnected.
      */
     dispose(): void;
 }

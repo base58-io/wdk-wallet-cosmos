@@ -44,6 +44,7 @@ import { withFallback } from './rpc-fallback.js'
 /** @typedef {import('@cosmjs/amino').StdSignature} StdSignature */
 /** @typedef {import('@cosmjs/stargate').IndexedTx} IndexedTx */
 /** @typedef {import('@cosmjs/stargate').IbcExtension['ibc']} IbcQueries */
+/** @typedef {import('@cosmjs/tendermint-rpc').CometClient} CometClient */
 /** @typedef {import('@tetherto/wdk-wallet').Transaction} Transaction */
 /** @typedef {import('@tetherto/wdk-wallet').TransactionReceipt} TransactionReceipt */
 /** @typedef {import('@tetherto/wdk-wallet').TransferOptions} TransferOptions */
@@ -144,13 +145,33 @@ function parseStdSignature(signature) {
 }
 
 /**
- * Connects a query client with the IBC extension to an RPC endpoint.
+ * Returns the promise cached under a key, creating it on first use. A promise
+ * that rejects is dropped, so the next call creates it again.
  *
- * @param {string} endpoint - The RPC endpoint.
- * @returns {Promise<{ client: QueryClient, ibc: IbcQueries }>} The raw client and its IBC queries.
+ * @template K, V
+ * @param {Map<K, Promise<V>>} cache - The cache.
+ * @param {K} key - The key.
+ * @param {() => Promise<V>} create - Creates the promise on a cache miss.
+ * @returns {Promise<V>} The cached promise.
  */
-async function connectIbc(endpoint) {
-  const client = new QueryClient(await connectComet(endpoint))
+export function cachePromise(cache, key, create) {
+  let promise = cache.get(key)
+  if (!promise) {
+    promise = create()
+    cache.set(key, promise)
+    promise.catch(() => cache.delete(key))
+  }
+  return promise
+}
+
+/**
+ * Creates a query client with the IBC extension over a CometBFT client.
+ *
+ * @param {CometClient} comet - The CometBFT client.
+ * @returns {{ client: QueryClient, ibc: IbcQueries }} The raw client and its IBC queries.
+ */
+function createIbcClient(comet) {
+  const client = new QueryClient(comet)
   return { client, ibc: setupIbcExtension(client).ibc }
 }
 
@@ -256,6 +277,14 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @type {Map<string, Promise<DenomTrace>>}
      */
     this._denomTraces = new Map()
+
+    /**
+     * CometBFT clients, keyed by RPC endpoint.
+     *
+     * @protected
+     * @type {Map<string, Promise<CometClient>>}
+     */
+    this._cometClients = new Map()
   }
 
   /**
@@ -317,6 +346,21 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
   }
 
   /**
+   * Returns the account's CometBFT client for an RPC endpoint. The first call
+   * connects, which asks the node for its CometBFT version; later calls reuse
+   * that client. A failed connection is not kept.
+   *
+   * @protected
+   * @param {string} endpoint - The RPC endpoint.
+   * @returns {Promise<CometClient>} The CometBFT client.
+   */
+  _getCometClient(endpoint) {
+    return cachePromise(this._cometClients, endpoint, () =>
+      connectComet(endpoint)
+    )
+  }
+
+  /**
    * Runs an operation against the configured RPC endpoints, with fallback.
    *
    * @protected
@@ -346,7 +390,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
     const address = await this.getAddress()
 
     const balance = await this._withFallback(endpoints, async endpoint => {
-      const client = await StargateClient.connect(endpoint)
+      const client = StargateClient.create(await this._getCometClient(endpoint))
       return client.getBalance(address, denomination)
     })
 
@@ -376,7 +420,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
     const address = await this.getAddress()
 
     const balances = await this._withFallback(endpoints, async endpoint => {
-      const client = await StargateClient.connect(endpoint)
+      const client = StargateClient.create(await this._getCometClient(endpoint))
       return client.getAllBalances(address)
     })
 
@@ -479,7 +523,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
 
     if (!this._ibcChannels) {
       this._ibcChannels = this._withFallback(endpoints, async endpoint => {
-        const { ibc } = await connectIbc(endpoint)
+        const { ibc } = createIbcClient(await this._getCometClient(endpoint))
         const { channels } = await ibc.channel.allChannels()
         const transferChannels = channels.filter(
           channel =>
@@ -533,10 +577,11 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
 
     const endpoints = this._assertRpcEndpoints('query IBC denoms')
 
-    let trace = this._denomTraces.get(denom)
-    if (!trace) {
-      trace = this._withFallback(endpoints, async endpoint => {
-        const { client, ibc } = await connectIbc(endpoint)
+    return await cachePromise(this._denomTraces, denom, () =>
+      this._withFallback(endpoints, async endpoint => {
+        const { client, ibc } = createIbcClient(
+          await this._getCometClient(endpoint)
+        )
         const response = await queryDenom(
           client,
           ibc,
@@ -560,13 +605,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
 
         return { baseDenom: response.base, path, sourceChainId }
       })
-      this._denomTraces.set(denom, trace)
-      trace.catch(() => {
-        this._denomTraces.delete(denom)
-      })
-    }
-
-    return await trace
+    )
   }
 
   /**
@@ -754,7 +793,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
     const endpoints = this._assertRpcEndpoints('get transaction receipts')
 
     return await this._withFallback(endpoints, async endpoint => {
-      const client = await StargateClient.connect(endpoint)
+      const client = StargateClient.create(await this._getCometClient(endpoint))
       return client.getTx(hash)
     })
   }

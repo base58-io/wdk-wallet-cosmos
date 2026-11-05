@@ -4,6 +4,7 @@ export type StdFee = import('@cosmjs/amino').StdFee;
 export type StdSignature = import('@cosmjs/amino').StdSignature;
 export type IndexedTx = import('@cosmjs/stargate').IndexedTx;
 export type IbcQueries = import('@cosmjs/stargate').IbcExtension['ibc'];
+export type CometClient = import('@cosmjs/tendermint-rpc').CometClient;
 export type Transaction = import('@tetherto/wdk-wallet').Transaction;
 export type TransactionReceipt = import('@tetherto/wdk-wallet').TransactionReceipt;
 export type TransferOptions = import('@tetherto/wdk-wallet').TransferOptions;
@@ -45,6 +46,17 @@ export type DenomTrace = {
     sourceChainId?: string;
 };
 /**
+ * Returns the promise cached under a key, creating it on first use. A promise
+ * that rejects is dropped, so the next call creates it again.
+ *
+ * @template K, V
+ * @param {Map<K, Promise<V>>} cache - The cache.
+ * @param {K} key - The key.
+ * @param {() => Promise<V>} create - Creates the promise on a cache miss.
+ * @returns {Promise<V>} The cached promise.
+ */
+export declare function cachePromise<K, V>(cache: Map<K, Promise<V>>, key: K, create: () => Promise<V>): Promise<V>;
+/**
  * A Cosmos wallet account without key material.
  *
  * Holds every path that only needs an address and an RPC endpoint: balances,
@@ -80,6 +92,13 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @type {Map<string, Promise<DenomTrace>>}
      */
     _denomTraces;
+    /**
+     * CometBFT clients, keyed by RPC endpoint.
+     *
+     * @protected
+     * @type {Map<string, Promise<CometClient>>}
+     */
+    _cometClients: Map<string, Promise<CometClient>>;
     /**
      * Creates a read-only account.
      *
@@ -120,6 +139,16 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @throws {ProviderRequiredError} If no RPC endpoint is configured.
      */
     protected _assertRpcEndpoints(operation?: string): string[];
+    /**
+     * Returns the account's CometBFT client for an RPC endpoint. The first call
+     * connects, which asks the node for its CometBFT version; later calls reuse
+     * that client. A failed connection is not kept.
+     *
+     * @protected
+     * @param {string} endpoint - The RPC endpoint.
+     * @returns {Promise<CometClient>} The CometBFT client.
+     */
+    protected _getCometClient(endpoint: string): Promise<CometClient>;
     /**
      * Runs an operation against the configured RPC endpoints, with fallback.
      *

@@ -14,7 +14,6 @@ import {
   createProtobufRpcClient,
   defaultRegistryTypes,
 } from '@cosmjs/stargate'
-import { connectComet } from '@cosmjs/tendermint-rpc'
 import {
   TransactionError,
   TransactionErrorReason,
@@ -30,7 +29,9 @@ import {
 import { Tx, TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
 import { resolveChainConfig } from './chain-config-resolver.js'
 import SeedSignerCosmos from './signers/seed-signer-cosmos.js'
-import WalletAccountCosmosReadOnly from './wallet-account-cosmos-read-only.js'
+import WalletAccountCosmosReadOnly, {
+  cachePromise,
+} from './wallet-account-cosmos-read-only.js'
 
 /** @typedef {import('@cosmjs/amino').Coin} Coin */
 /** @typedef {import('@cosmjs/amino').StdFee} StdFee */
@@ -361,6 +362,32 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
      * @type {boolean}
      */
     this._disposed = false
+
+    /**
+     * Signing clients, keyed by RPC endpoint. A client fetches the chain id
+     * on its first signature and keeps it.
+     *
+     * @private
+     * @type {Map<string, Promise<SigningStargateClient>>}
+     */
+    this._signingClients = new Map()
+  }
+
+  /**
+   * Returns the account's signing client for an RPC endpoint, over the
+   * endpoint's CometBFT client.
+   *
+   * @private
+   * @param {string} endpoint - The RPC endpoint.
+   * @returns {Promise<SigningStargateClient>} The signing client.
+   */
+  _getSigningClient(endpoint) {
+    return cachePromise(this._signingClients, endpoint, async () =>
+      SigningStargateClient.createWithSigner(
+        await this._getCometClient(endpoint),
+        this._signer
+      )
+    )
   }
 
   /**
@@ -463,10 +490,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
 
     const address = await this.getAddress()
     const result = await this._withFallback(endpoints, async endpoint => {
-      const client = await SigningStargateClient.connectWithSigner(
-        endpoint,
-        this._signer
-      )
+      const client = await this._getSigningClient(endpoint)
       return client.signAndBroadcast(address, messages, fee, memo)
     })
     assertDelivered(result, 'transfer')
@@ -588,7 +612,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
     }
 
     const gasUsed = await this._withFallback(endpoints, async endpoint => {
-      const comet = await connectComet(endpoint)
+      const comet = await this._getCometClient(endpoint)
       const { sequence } = await StargateClient.create(comet).getSequence(
         address
       )
@@ -837,10 +861,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
     const address = await this.getAddress()
 
     return await this._withFallback(endpoints, async endpoint => {
-      const client = await SigningStargateClient.connectWithSigner(
-        endpoint,
-        this._signer
-      )
+      const client = await this._getSigningClient(endpoint)
       return client.sign(address, messages, fee, memo)
     })
   }
@@ -869,7 +890,9 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
       this._assertTransactionFeeWithinLimit(transactionFee)
 
       const result = await this._withFallback(endpoints, async endpoint => {
-        const client = await StargateClient.connect(endpoint)
+        const client = StargateClient.create(
+          await this._getCometClient(endpoint)
+        )
         return await client.broadcastTx(transactionBytes)
       })
       assertDelivered(result, 'transaction')
@@ -888,10 +911,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
     const address = await this.getAddress()
 
     const result = await this._withFallback(endpoints, async endpoint => {
-      const client = await SigningStargateClient.connectWithSigner(
-        endpoint,
-        this._signer
-      )
+      const client = await this._getSigningClient(endpoint)
       return client.signAndBroadcast(address, messages, fee, memo)
     })
     assertDelivered(result, 'transaction')
@@ -957,11 +977,21 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
   /**
    * Disposes the wallet account. After calling this method, the account can no longer be used.
    * The signer is disposed, securely erasing its key material, only if the account owns it.
+   * The account's RPC clients are disconnected.
    */
   dispose() {
     if (this._disposed) {
       return
     }
+
+    for (const client of this._cometClients.values()) {
+      client.then(
+        comet => comet.disconnect(),
+        () => {}
+      )
+    }
+    this._cometClients.clear()
+    this._signingClients.clear()
 
     if (this._shouldWipeSignerOnDisposal) {
       this._signer.dispose()
