@@ -1,7 +1,7 @@
 'use strict'
 
 import { ValueError } from '@tetherto/wdk-wallet'
-import { chains } from 'chain-registry'
+import { chains, ibcData } from 'chain-registry'
 
 const DEFAULT_GAS_ADJUSTMENT = 1.3
 
@@ -49,7 +49,7 @@ function resolveGasAdjustment(gasAdjustment = DEFAULT_GAS_ADJUSTMENT) {
  * @property {number} [gasAdjustment] - The multiplier applied to simulated gas usage to set the gas limit (default: 1.3).
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
- * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
+ * @property {Record<string, string>} [ibcChains] - Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know (e.g. `{ wdk2: 'wdkdev2' }`). An entry overrides the registry for its prefix.
  */
 
 /**
@@ -67,7 +67,7 @@ function resolveGasAdjustment(gasAdjustment = DEFAULT_GAS_ADJUSTMENT) {
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {string} [chainId] - The chain ID (from registry).
  * @property {string} [prettyName] - The human-readable chain name (from registry).
- * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
+ * @property {Record<string, string>} [ibcChains] - Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know (e.g. `{ wdk2: 'wdkdev2' }`). An entry overrides the registry for its prefix.
  */
 
 /**
@@ -112,7 +112,7 @@ export function resolveChainConfig(config = {}) {
       gasAdjustment,
       transferMaxFee: config.transferMaxFee,
       transactionMaxFee: config.transactionMaxFee,
-      ibcChannels: config.ibcChannels,
+      ibcChains: config.ibcChains,
     }
   }
 
@@ -171,10 +171,74 @@ export function resolveChainConfig(config = {}) {
     gasAdjustment,
     transferMaxFee: config.transferMaxFee,
     transactionMaxFee: config.transactionMaxFee,
-    ibcChannels: config.ibcChannels,
+    ibcChains: config.ibcChains,
     chainId: chainData.chainId,
     prettyName: chainData.prettyName,
   }
+}
+
+/**
+ * Returns the chain ids a Bech32 prefix may belong to: the `ibcChains` entry
+ * for the prefix if there is one, else every chain-registry chain using it.
+ * Several registry chains can share a prefix (e.g. a mainnet and its testnet);
+ * the caller tells them apart by which one an open IBC channel leads to.
+ *
+ * @param {string} prefix - The Bech32 prefix.
+ * @param {Record<string, string>} [ibcChains] - The configured prefix to chain id map.
+ * @returns {string[]} The candidate chain ids, empty if the prefix is unknown.
+ */
+export function getChainIdsForPrefix(prefix, ibcChains = {}) {
+  if (Object.prototype.hasOwnProperty.call(ibcChains, prefix)) {
+    return [ibcChains[prefix]]
+  }
+
+  return chains
+    .filter(chain => chain.bech32Prefix === prefix && chain.chainId)
+    .map(chain => /** @type {string} */ (chain.chainId))
+}
+
+/**
+ * Returns the `transfer` channels chain-registry lists for a chain, one per
+ * counterparty chain: the one tagged preferred, else the only one not marked
+ * inactive. Two chains can share several open channels, most of them stale;
+ * the registry names the one in use. A counterparty with several channels and
+ * none preferred keeps them all, so the caller can report the ambiguity.
+ *
+ * @param {string} chainId - The chain the channels are on.
+ * @returns {{ channelId: string, counterpartyChannelId: string, counterpartyChainId: string }[]} The channels, empty if the registry lists none.
+ */
+export function getRegistryIbcChannels(chainId) {
+  const listed = ibcData.flatMap(pair => {
+    const ownIsChain1 = pair.chain1.chainId === chainId
+    if (!ownIsChain1 && pair.chain2.chainId !== chainId) return []
+    const counterpartyChainId = ownIsChain1
+      ? pair.chain2.chainId
+      : pair.chain1.chainId
+
+    const transferChannels = pair.channels.filter(
+      ({ chain1, chain2, tags }) =>
+        chain1.portId === 'transfer' &&
+        chain2.portId === 'transfer' &&
+        tags?.status !== 'INACTIVE'
+    )
+    const preferred = transferChannels.find(({ tags }) => tags?.preferred)
+
+    return (preferred ? [preferred] : transferChannels).map(
+      ({ chain1, chain2 }) => {
+        const [own, counterparty] = ownIsChain1
+          ? [chain1, chain2]
+          : [chain2, chain1]
+        return {
+          channelId: own.channelId,
+          counterpartyChannelId: counterparty.channelId,
+          counterpartyChainId,
+        }
+      }
+    )
+  })
+
+  // The registry lists some chain pairs more than once.
+  return [...new Map(listed.map(channel => [channel.channelId, channel])).values()]
 }
 
 /**

@@ -9,7 +9,12 @@ import {
 import { Secp256k1, Secp256k1Signature, sha256 } from '@cosmjs/crypto'
 import { fromBase64, toBase64 } from '@cosmjs/encoding'
 import { decodeTxRaw } from '@cosmjs/proto-signing'
-import { StargateClient } from '@cosmjs/stargate'
+import {
+  QueryClient,
+  StargateClient,
+  setupIbcExtension,
+} from '@cosmjs/stargate'
+import { connectComet } from '@cosmjs/tendermint-rpc'
 import {
   DisposalError,
   MaximumFeeExceededError,
@@ -19,7 +24,13 @@ import {
   WalletAccountReadOnly,
 } from '@tetherto/wdk-wallet'
 import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx'
-import { resolveChainConfig } from './chain-config-resolver.js'
+import { State as ChannelState } from 'cosmjs-types/ibc/core/channel/v1/channel'
+import { ClientState as TendermintClientState } from 'cosmjs-types/ibc/lightclients/tendermint/v1/tendermint'
+import {
+  getChainIdsForPrefix,
+  getRegistryIbcChannels,
+  resolveChainConfig,
+} from './chain-config-resolver.js'
 import {
   DEFAULT_GAS_PRICE_STEP,
   DEFAULT_TRANSFER_GAS_LIMIT,
@@ -30,6 +41,7 @@ import { withFallback } from './rpc-fallback.js'
 /** @typedef {import('@cosmjs/amino').StdFee} StdFee */
 /** @typedef {import('@cosmjs/amino').StdSignature} StdSignature */
 /** @typedef {import('@cosmjs/stargate').IndexedTx} IndexedTx */
+/** @typedef {import('@cosmjs/stargate').IbcExtension['ibc']} IbcQueries */
 /** @typedef {import('@tetherto/wdk-wallet').Transaction} Transaction */
 /** @typedef {import('@tetherto/wdk-wallet').TransactionReceipt} TransactionReceipt */
 /** @typedef {import('@tetherto/wdk-wallet').TransferOptions} TransferOptions */
@@ -44,8 +56,22 @@ import { withFallback } from './rpc-fallback.js'
  * @typedef {TransactionReceipt & { transaction: IndexedTx }} CosmosTransactionReceipt
  */
 
+/**
+ * An open ICS-20 `transfer` channel on the account's chain.
+ *
+ * @typedef {Object} IbcChannel
+ * @property {string} channelId - The channel id on this chain, the `sourceChannel` of a transfer over it.
+ * @property {string} counterpartyChannelId - The channel id on the counterparty chain.
+ * @property {string} counterpartyChainId - The chain id the channel leads to.
+ */
+
 // CometBFT chains produce blocks roughly every 6 seconds.
 const BLOCK_TIME = 6000
+
+const TRANSFER_PORT = 'transfer'
+
+const TENDERMINT_CLIENT_STATE_TYPE_URL =
+  '/ibc.lightclients.tendermint.v1.ClientState'
 
 const TEXT_ENCODER = new TextEncoder()
 
@@ -101,6 +127,37 @@ function parseStdSignature(signature) {
 }
 
 /**
+ * Connects a query client with the IBC extension to an RPC endpoint.
+ *
+ * @param {string} endpoint - The RPC endpoint.
+ * @returns {Promise<{ client: QueryClient, ibc: IbcQueries }>} The raw client and its IBC queries.
+ */
+async function connectIbc(endpoint) {
+  const client = new QueryClient(await connectComet(endpoint))
+  return { client, ibc: setupIbcExtension(client).ibc }
+}
+
+/**
+ * Reads the counterparty chain id from a channel's light client.
+ *
+ * @param {IbcQueries} ibc - The IBC queries.
+ * @param {string} portId - The channel's port.
+ * @param {string} channelId - The channel id.
+ * @returns {Promise<string | undefined>} The chain id, or undefined if the client is not Tendermint.
+ */
+async function queryCounterpartyChainId(ibc, portId, channelId) {
+  const { identifiedClientState } = await ibc.channel.clientState(
+    portId,
+    channelId
+  )
+  const clientState = identifiedClientState?.clientState
+  if (clientState?.typeUrl !== TENDERMINT_CLIENT_STATE_TYPE_URL) {
+    return undefined
+  }
+  return TendermintClientState.decode(clientState.value).chainId
+}
+
+/**
  * A Cosmos wallet account without key material.
  *
  * Holds every path that only needs an address and an RPC endpoint: balances,
@@ -132,6 +189,15 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @type {string}
      */
     this._prefix = resolvedConfig.addressPrefix
+
+    /**
+     * The chain's open transfer channels, queried once per account.
+     *
+     * @private
+     * @type {Promise<IbcChannel[]> | undefined}
+     */
+    this._ibcChannels = undefined
+
   }
 
   /**
@@ -329,28 +395,105 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
   }
 
   /**
-   * Returns IBC channel config for a destination Bech32 prefix.
+   * Returns the ICS-20 `transfer` channels the account can send over, each
+   * with the chain id it leads to.
    *
-   * @param {string} prefix - The destination Bech32 prefix.
-   * @returns {{ sourceChannel: string }} The IBC channel configuration.
-   * @throws {ValueError} If no channel is configured for the prefix.
+   * A chain configured by `chainName` reads them from chain-registry, with no
+   * RPC query: one channel per counterparty, the one the registry prefers.
+   * Its open channels on chain include stale ones, often hundreds of them.
+   *
+   * Any other chain, such as a local testnet, queries its open channels whose
+   * counterparty is a Tendermint chain. Channels rarely change, so the account
+   * queries them once and serves later calls from that result; a failed query
+   * is not cached. Create a new account to pick up channels opened since.
+   *
+   * @returns {Promise<IbcChannel[]>} The transfer channels.
+   * @throws {ProviderRequiredError} If the chain is not configured by `chainName` and no RPC endpoint is configured.
    */
-  _getIbcChannelConfigForPrefix(prefix) {
-    const ibcChannels = this._config.ibcChannels
-    if (!ibcChannels) {
+  async getIbcChannels() {
+    this._assertNotDisposed()
+
+    if (this._config.chainId) {
+      return getRegistryIbcChannels(this._config.chainId)
+    }
+
+    const endpoints = this._assertRpcEndpoints('query IBC channels')
+
+    if (!this._ibcChannels) {
+      this._ibcChannels = this._withFallback(endpoints, async endpoint => {
+        const { ibc } = await connectIbc(endpoint)
+        const { channels } = await ibc.channel.allChannels()
+        const transferChannels = channels.filter(
+          channel =>
+            channel.state === ChannelState.STATE_OPEN &&
+            channel.portId === TRANSFER_PORT &&
+            channel.counterparty.portId === TRANSFER_PORT
+        )
+
+        const resolved = await Promise.all(
+          transferChannels.map(async channel => ({
+            channelId: channel.channelId,
+            counterpartyChannelId: channel.counterparty.channelId,
+            counterpartyChainId: await queryCounterpartyChainId(
+              ibc,
+              TRANSFER_PORT,
+              channel.channelId
+            ),
+          }))
+        )
+
+        return resolved.filter(
+          /** @returns {channel is IbcChannel} */
+          channel => channel.counterpartyChainId !== undefined
+        )
+      })
+      this._ibcChannels.catch(() => {
+        this._ibcChannels = undefined
+      })
+    }
+
+    return await this._ibcChannels
+  }
+
+  /**
+   * Returns the open transfer channel leading to the chain behind a Bech32
+   * prefix. The prefix resolves to candidate chain ids through `ibcChains`
+   * and chain-registry; exactly one channel from `getIbcChannels` must lead to
+   * one of them.
+   *
+   * @protected
+   * @param {string} prefix - The destination Bech32 prefix.
+   * @returns {Promise<IbcChannel>} The channel to transfer over.
+   * @throws {ValueError} If the prefix is unknown, or no single channel leads to its chain.
+   */
+  async _getIbcChannelForPrefix(prefix) {
+    const chainIds = getChainIdsForPrefix(prefix, this._config.ibcChains)
+    if (chainIds.length === 0) {
       throw new ValueError(
-        'IBC channels configuration is not available for this wallet.'
+        `No chain is known for the Bech32 prefix "${prefix}". Map it to a chain id in the ibcChains config.`
       )
     }
 
-    const channelConfig = ibcChannels[prefix]
-    if (!channelConfig || !channelConfig.sourceChannel) {
+    const channels = (await this.getIbcChannels()).filter(channel =>
+      chainIds.includes(channel.counterpartyChainId)
+    )
+    if (channels.length === 0) {
       throw new ValueError(
-        `IBC channel configuration not found for destination prefix: ${prefix}`
+        `No IBC transfer channel leads to ${chainIds.join(' or ')} (Bech32 prefix "${prefix}").`
+      )
+    }
+    if (channels.length > 1) {
+      throw new ValueError(
+        `Several IBC transfer channels lead to Bech32 prefix "${prefix}": ` +
+          channels
+            .map(
+              channel => `${channel.channelId} (${channel.counterpartyChainId})`
+            )
+            .join(', ')
       )
     }
 
-    return channelConfig
+    return channels[0]
   }
 
   /**
@@ -363,6 +506,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
    * @param {TransferOptions} options - The transfer's options.
    * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
    * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
+   * @throws {ValueError} If the recipient is on another chain that no single IBC channel leads to.
    */
   async quoteTransfer(options) {
     this._assertNotDisposed()
@@ -370,7 +514,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
 
     const recipientPrefix = this._getBech32Prefix(options.recipient)
     if (recipientPrefix !== this._config.addressPrefix) {
-      this._getIbcChannelConfigForPrefix(recipientPrefix)
+      await this._getIbcChannelForPrefix(recipientPrefix)
     }
 
     const fee = this._buildFee(DEFAULT_TRANSFER_GAS_LIMIT)

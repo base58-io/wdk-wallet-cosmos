@@ -424,6 +424,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
    * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
    * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
    * @throws {ProviderError} If the provider fails to estimate the costs of the transfer.
+   * @throws {ValueError} If the recipient is on another chain that no single IBC channel leads to.
    * @throws {Error} If the chain rejects the simulated transfer.
    */
   async quoteTransfer(options) {
@@ -448,6 +449,7 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
    * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
    * @throws {ProviderError} If the provider fails to estimate the costs of the transfer.
    * @throws {TransferError} If the transfer failed on chain for insufficient funds.
+   * @throws {ValueError} If the recipient is on another chain that no single IBC channel leads to.
    * @throws {Error} If the chain rejects the simulated transfer, or the transfer failed on chain for any other reason.
    */
   async transfer(options) {
@@ -477,8 +479,8 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
 
   /**
    * Builds a transfer's message and prices it by simulation: a bank `MsgSend`
-   * for a recipient with this chain's prefix, an IBC `MsgTransfer` over the
-   * configured channel otherwise.
+   * for a recipient with this chain's prefix, an IBC `MsgTransfer` otherwise,
+   * over the channel leading to the recipient's chain.
    *
    * @protected
    * @param {TransferOptions & { memo?: string }} options - The transfer's options.
@@ -496,8 +498,8 @@ export default class WalletAccountCosmos extends WalletAccountCosmosReadOnly {
       )
     }
 
-    const { sourceChannel } =
-      this._getIbcChannelConfigForPrefix(recipientPrefix)
+    const { channelId: sourceChannel } =
+      await this._getIbcChannelForPrefix(recipientPrefix)
     const ibcMemo = memo ?? 'Transfer via WDK (IBC)'
     const timeoutTimestampNanoseconds = String(
       (Date.now() + IBC_TIMEOUT_SECONDS * 1000) * 1_000_000

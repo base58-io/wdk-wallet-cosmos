@@ -13,6 +13,7 @@
 /** @typedef {import('./src/wallet-account-cosmos.js').CosmosWalletConfig} CosmosWalletConfig */
 /** @typedef {import('./src/chain-config-resolver.js').ResolvedChainConfig} ResolvedChainConfig */
 /** @typedef {import('./src/wallet-account-cosmos-read-only.js').CosmosTransactionReceipt} CosmosTransactionReceipt */
+/** @typedef {import('./src/wallet-account-cosmos-read-only.js').IbcChannel} IbcChannel */
 
 /** @typedef {import('./src/wallet-account-cosmos.js').DirectSignDocJson} DirectSignDocJson */
 /** @typedef {import('./src/wallet-account-cosmos.js').SignDirectParams} SignDirectParams */

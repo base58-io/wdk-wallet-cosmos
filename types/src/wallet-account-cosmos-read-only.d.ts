@@ -3,6 +3,7 @@ import { TxRaw } from 'cosmjs-types/cosmos/tx/v1beta1/tx';
 export type StdFee = import('@cosmjs/amino').StdFee;
 export type StdSignature = import('@cosmjs/amino').StdSignature;
 export type IndexedTx = import('@cosmjs/stargate').IndexedTx;
+export type IbcQueries = import('@cosmjs/stargate').IbcExtension['ibc'];
 export type Transaction = import('@tetherto/wdk-wallet').Transaction;
 export type TransactionReceipt = import('@tetherto/wdk-wallet').TransactionReceipt;
 export type TransferOptions = import('@tetherto/wdk-wallet').TransferOptions;
@@ -11,6 +12,20 @@ export type CosmosWalletConfig = import('./chain-config-resolver.js').CosmosWall
 export type ResolvedChainConfig = import('./chain-config-resolver.js').ResolvedChainConfig;
 export type CosmosTransactionReceipt = TransactionReceipt & {
     transaction: IndexedTx;
+};
+export type IbcChannel = {
+    /**
+     * - The channel id on this chain, the `sourceChannel` of a transfer over it.
+     */
+    channelId: string;
+    /**
+     * - The channel id on the counterparty chain.
+     */
+    counterpartyChannelId: string;
+    /**
+     * - The chain id the channel leads to.
+     */
+    counterpartyChainId: string;
 };
 /**
  * A Cosmos wallet account without key material.
@@ -34,6 +49,13 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @type {string}
      */
     _prefix: string;
+    /**
+     * The chain's open transfer channels, queried once per account.
+     *
+     * @private
+     * @type {Promise<IbcChannel[]> | undefined}
+     */
+    _ibcChannels;
     /**
      * Creates a read-only account.
      *
@@ -133,15 +155,34 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      */
     _getBech32Prefix(address: string): string;
     /**
-     * Returns IBC channel config for a destination Bech32 prefix.
+     * Returns the ICS-20 `transfer` channels the account can send over, each
+     * with the chain id it leads to.
      *
-     * @param {string} prefix - The destination Bech32 prefix.
-     * @returns {{ sourceChannel: string }} The IBC channel configuration.
-     * @throws {ValueError} If no channel is configured for the prefix.
+     * A chain configured by `chainName` reads them from chain-registry, with no
+     * RPC query: one channel per counterparty, the one the registry prefers.
+     * Its open channels on chain include stale ones, often hundreds of them.
+     *
+     * Any other chain, such as a local testnet, queries its open channels whose
+     * counterparty is a Tendermint chain. Channels rarely change, so the account
+     * queries them once and serves later calls from that result; a failed query
+     * is not cached. Create a new account to pick up channels opened since.
+     *
+     * @returns {Promise<IbcChannel[]>} The transfer channels.
+     * @throws {ProviderRequiredError} If the chain is not configured by `chainName` and no RPC endpoint is configured.
      */
-    _getIbcChannelConfigForPrefix(prefix: string): {
-        sourceChannel: string;
-    };
+    getIbcChannels(): Promise<IbcChannel[]>;
+    /**
+     * Returns the open transfer channel leading to the chain behind a Bech32
+     * prefix. The prefix resolves to candidate chain ids through `ibcChains`
+     * and chain-registry; exactly one channel from `getIbcChannels` must lead to
+     * one of them.
+     *
+     * @protected
+     * @param {string} prefix - The destination Bech32 prefix.
+     * @returns {Promise<IbcChannel>} The channel to transfer over.
+     * @throws {ValueError} If the prefix is unknown, or no single channel leads to its chain.
+     */
+    protected _getIbcChannelForPrefix(prefix: string): Promise<IbcChannel>;
     /**
      * Quotes the costs of a transfer operation.
      *
@@ -152,6 +193,7 @@ export default class WalletAccountCosmosReadOnly extends WalletAccountReadOnly {
      * @param {TransferOptions} options - The transfer's options.
      * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
      * @throws {MaximumFeeExceededError} If the estimated fee exceeds the transfer max. fee option.
+     * @throws {ValueError} If the recipient is on another chain that no single IBC channel leads to.
      */
     quoteTransfer(options: TransferOptions): Promise<Omit<TransferResult, 'hash'>>;
     /**

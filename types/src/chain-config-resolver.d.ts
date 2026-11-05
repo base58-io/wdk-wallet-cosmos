@@ -44,11 +44,9 @@ export type CosmosWalletConfig = {
      */
     transactionMaxFee?: number | bigint;
     /**
-     * - Optional IBC channel map keyed by destination Bech32 prefix.
+     * - Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know (e.g. `{ wdk2: 'wdkdev2' }`). An entry overrides the registry for its prefix.
      */
-    ibcChannels?: Record<string, {
-        sourceChannel: string;
-    }>;
+    ibcChains?: Record<string, string>;
 };
 export type ResolvedChainConfig = {
     /**
@@ -109,11 +107,9 @@ export type ResolvedChainConfig = {
      */
     prettyName?: string;
     /**
-     * - Optional IBC channel map keyed by destination Bech32 prefix.
+     * - Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know (e.g. `{ wdk2: 'wdkdev2' }`). An entry overrides the registry for its prefix.
      */
-    ibcChannels?: Record<string, {
-        sourceChannel: string;
-    }>;
+    ibcChains?: Record<string, string>;
 };
 /**
  * @typedef {Object} CosmosWalletConfig
@@ -128,7 +124,7 @@ export type ResolvedChainConfig = {
  * @property {number} [gasAdjustment] - The multiplier applied to simulated gas usage to set the gas limit (default: 1.3).
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
- * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
+ * @property {Record<string, string>} [ibcChains] - Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know (e.g. `{ wdk2: 'wdkdev2' }`). An entry overrides the registry for its prefix.
  */
 /**
  * @typedef {Object} ResolvedChainConfig
@@ -145,7 +141,7 @@ export type ResolvedChainConfig = {
  * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for transaction operations.
  * @property {string} [chainId] - The chain ID (from registry).
  * @property {string} [prettyName] - The human-readable chain name (from registry).
- * @property {Record<string, { sourceChannel: string }>} [ibcChannels] - Optional IBC channel map keyed by destination Bech32 prefix.
+ * @property {Record<string, string>} [ibcChains] - Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know (e.g. `{ wdk2: 'wdkdev2' }`). An entry overrides the registry for its prefix.
  */
 /**
  * Resolves chain configuration from chain-registry or custom config.
@@ -174,6 +170,32 @@ export type ResolvedChainConfig = {
  * });
  */
 export declare function resolveChainConfig(config?: CosmosWalletConfig): ResolvedChainConfig;
+/**
+ * Returns the chain ids a Bech32 prefix may belong to: the `ibcChains` entry
+ * for the prefix if there is one, else every chain-registry chain using it.
+ * Several registry chains can share a prefix (e.g. a mainnet and its testnet);
+ * the caller tells them apart by which one an open IBC channel leads to.
+ *
+ * @param {string} prefix - The Bech32 prefix.
+ * @param {Record<string, string>} [ibcChains] - The configured prefix to chain id map.
+ * @returns {string[]} The candidate chain ids, empty if the prefix is unknown.
+ */
+export declare function getChainIdsForPrefix(prefix: string, ibcChains?: Record<string, string>): string[];
+/**
+ * Returns the `transfer` channels chain-registry lists for a chain, one per
+ * counterparty chain: the one tagged preferred, else the only one not marked
+ * inactive. Two chains can share several open channels, most of them stale;
+ * the registry names the one in use. A counterparty with several channels and
+ * none preferred keeps them all, so the caller can report the ambiguity.
+ *
+ * @param {string} chainId - The chain the channels are on.
+ * @returns {{ channelId: string, counterpartyChannelId: string, counterpartyChainId: string }[]} The channels, empty if the registry lists none.
+ */
+export declare function getRegistryIbcChannels(chainId: string): {
+    channelId: string;
+    counterpartyChannelId: string;
+    counterpartyChainId: string;
+}[];
 /**
  * Returns the list of available chain names from chain-registry.
  *

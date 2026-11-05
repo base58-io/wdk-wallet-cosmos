@@ -9,6 +9,7 @@ export type WaitForTransactionOptions = import('@tetherto/wdk-wallet').WaitForTr
 export type CosmosWalletConfig = import('./src/wallet-account-cosmos.js').CosmosWalletConfig;
 export type ResolvedChainConfig = import('./src/chain-config-resolver.js').ResolvedChainConfig;
 export type CosmosTransactionReceipt = import('./src/wallet-account-cosmos-read-only.js').CosmosTransactionReceipt;
+export type IbcChannel = import('./src/wallet-account-cosmos-read-only.js').IbcChannel;
 export type DirectSignDocJson = import('./src/wallet-account-cosmos.js').DirectSignDocJson;
 export type SignDirectParams = import('./src/wallet-account-cosmos.js').SignDirectParams;
 export type SignDirectResult = import('./src/wallet-account-cosmos.js').SignDirectResult;
@@ -25,6 +26,7 @@ export type SignAminoResult = import('./src/wallet-account-cosmos.js').SignAmino
 /** @typedef {import('./src/wallet-account-cosmos.js').CosmosWalletConfig} CosmosWalletConfig */
 /** @typedef {import('./src/chain-config-resolver.js').ResolvedChainConfig} ResolvedChainConfig */
 /** @typedef {import('./src/wallet-account-cosmos-read-only.js').CosmosTransactionReceipt} CosmosTransactionReceipt */
+/** @typedef {import('./src/wallet-account-cosmos-read-only.js').IbcChannel} IbcChannel */
 /** @typedef {import('./src/wallet-account-cosmos.js').DirectSignDocJson} DirectSignDocJson */
 /** @typedef {import('./src/wallet-account-cosmos.js').SignDirectParams} SignDirectParams */
 /** @typedef {import('./src/wallet-account-cosmos.js').SignDirectResult} SignDirectResult */
