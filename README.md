@@ -19,6 +19,7 @@ For detailed documentation about the complete WDK ecosystem, visit [docs.wallet.
 - **Token Support**: Query native token balances (uatom, etc.)
 - **Chain Registry Integration**: Auto-configure from [chain-registry](https://github.com/hyperweb-io/chain-registry) or use custom chain config
 - **RPC Fallback**: Automatic failover across multiple RPC endpoints with exponential backoff retry logic
+- **IBC Transfers**: Routes transfers to other chains over the IBC channel chain-registry or the chain itself names, with no channel configuration
 - **IBC Development Environment**: Local testnet with two chains and Hermes relayer for IBC testing
 
 ## Installation
@@ -168,6 +169,43 @@ await account.transfer({
 })
 ```
 
+### IBC Transfers
+
+A recipient whose Bech32 prefix differs from the account's is on another chain,
+so `transfer` sends an IBC `MsgTransfer` instead of a bank send. The channel is
+not configured:
+
+1. The prefix resolves to candidate chain ids: the `ibcChains` entry for the
+   prefix if there is one, else every [chain-registry](https://github.com/hyperweb-io/chain-registry)
+   chain using it.
+2. Of the account's `transfer` channels (see `getIbcChannels`), exactly one
+   must lead to a candidate chain id. None or several throw a `ValueError`.
+
+Chains the registry does not know, such as a local testnet, need an `ibcChains`
+entry:
+
+```javascript
+const wallet = new WalletManagerCosmos(seedPhrase, {
+  rpcEndpoints: ['http://localhost:26657'],
+  addressPrefix: 'wdk',
+  nativeDenom: 'stake',
+  ibcChains: { wdk2: 'wdkdev2' }, // Bech32 prefix -> chain id
+})
+```
+
+To list where the account can send, and where an IBC token came from:
+
+```javascript
+const channels = await account.getIbcChannels()
+// [{ channelId: 'channel-0', counterpartyChannelId: 'channel-0', counterpartyChainId: 'wdkdev2' }]
+
+// On wdkdev2, the stake wdkdev sent over channel-0:
+const trace = await account.getDenomTrace('ibc/C053D637CCA2A2BA030E2C5EE1B28A16F71CCB0E45E8BE52766DC1B241B77878')
+// { baseDenom: 'stake', path: [{ portId: 'transfer', channelId: 'channel-0' }], sourceChainId: 'wdkdev' }
+
+await account.getDenomTrace('stake') // null: not an IBC denom
+```
+
 ### Fee Management
 
 Retrieve current fee rates using `WalletManagerCosmos`.
@@ -258,6 +296,7 @@ new WalletManagerCosmos(seedOrSigner, config)
   - `gasAdjustment` (number, optional): Multiplier applied to simulated gas usage to set the gas limit (default: 1.3)
   - `transferMaxFee` (number | bigint, optional): Maximum fee amount for transfer operations
   - `transactionMaxFee` (number | bigint, optional): Maximum fee amount for transaction operations
+  - `ibcChains` (Record<string, string>, optional): Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know (e.g. `{ wdk2: 'wdkdev2' }`). An entry overrides the registry for its prefix. See [IBC Transfers](#ibc-transfers)
 
 **Example:**
 
@@ -343,6 +382,7 @@ const signerAccount = await WalletAccountCosmos.fromSigner(signer, config)
   - `gasAdjustment` (number, optional): Multiplier applied to simulated gas usage (default: 1.3)
   - `transferMaxFee` (number | bigint, optional): Maximum transfer fee amount
   - `transactionMaxFee` (number | bigint, optional): Maximum transaction fee amount
+  - `ibcChains` (Record<string, string>, optional): Chain ids keyed by Bech32 prefix, for IBC destinations chain-registry does not know
 
 #### Methods
 
@@ -363,6 +403,8 @@ const signerAccount = await WalletAccountCosmos.fromSigner(signer, config)
 | `getTokenBalance(denom)`   | Returns the balance of a specific token                                                    | `Promise<bigint>`                      |
 | `getTokenBalances(denoms)` | Returns balances of multiple specified tokens                                              | `Promise<Record<string, bigint>>`      |
 | `getTransaction(hash)`     | Returns a normalized, finality-based receipt                                                | `Promise<CosmosTransactionReceipt>`    |
+| `getIbcChannels()`         | Returns the `transfer` channels the account can send over and the chain id each leads to | `Promise<IbcChannel[]>`                |
+| `getDenomTrace(denom)`     | Returns the base denom, hop path and source chain of an `ibc/<hash>` denom, or `null` for any other denom | `Promise<DenomTrace \| null>`         |
 | `waitForTransaction(hash, options?)` | Polls `getTransaction` until the transaction reaches the requested finality       | `Promise<CosmosTransactionReceipt>`    |
 | `getTransactionReceipt(hash)` | Deprecated. Returns the raw CometBFT indexed transaction, or `null` if not yet in a block | `Promise<IndexedTx \| null>`           |
 | `toReadOnlyAccount()`      | Returns a `WalletAccountCosmosReadOnly` for this address, without key material              | `Promise<WalletAccountCosmosReadOnly>` |
@@ -381,6 +423,54 @@ Transfers tokens to another address.
   - `memo` (string, optional): Transaction memo. Defaults to `"Transfer via WDK"`, or `"Transfer via WDK (IBC)"` on the IBC path. On an IBC transfer it is set on both the `MsgTransfer` and the transaction itself.
 
 **Returns:** `Promise<{hash: string, fee: bigint}>` - Object containing hash and fee
+
+A recipient on another chain is sent to over IBC; see [IBC Transfers](#ibc-transfers).
+
+##### `getIbcChannels()`
+
+Returns the ICS-20 channels (port `transfer` on both ends) the account can send
+over, each with the chain id it leads to.
+
+- **A chain configured by `chainName`** reads them from chain-registry, with no
+  RPC query: one channel per counterparty chain, the one the registry marks as
+  preferred. On chain, stale channels stay open, often hundreds of them, so the
+  chain cannot tell which one is in use. New channels arrive with a
+  chain-registry version bump.
+- **Any other chain**, such as a local testnet, queries its open channels. The
+  counterparty chain id is read from each channel's light client, and channels
+  on a light client other than Tendermint are left out.
+
+```typescript
+type IbcChannel = {
+  channelId: string // on this chain: the transfer's source channel
+  counterpartyChannelId: string // on the counterparty chain
+  counterpartyChainId: string
+}
+```
+
+Queried channels are cached per account, since channels rarely change. A failed
+query is not cached. Create a new account to pick up channels opened since.
+
+##### `getDenomTrace(denom)`
+
+Returns `null` for a denom without the `ibc/` prefix. For an `ibc/<hash>` denom:
+
+```typescript
+type DenomTrace = {
+  baseDenom: string // the denom on the chain the token is native to
+  path: { portId: string; channelId: string }[] // most recent hop first
+  sourceChainId?: string // the counterparty of path[0]
+}
+```
+
+`path[0]` is the channel on this chain the token arrived through, so
+`sourceChainId` is the chain it arrived from. For a single-hop token, that is the
+chain it is native to. A multi-hop token's earlier hops are channels on other
+chains, which this account cannot resolve. `sourceChainId` is unset if the
+channel's light client is not Tendermint. Traces never change, so each denom is
+queried once per account. A hash the chain does not know throws. Chains on
+ibc-go v8 and older, such as Osmosis, are queried through their older
+`DenomTrace` query.
 
 ##### Fee estimation behavior
 
@@ -470,7 +560,7 @@ const standalone = WalletAccountCosmosReadOnly.fromAddress(address, config)
 Every read path of `WalletAccountCosmos` is available: `getAddress`,
 `getBalance`, `getTokenBalance`, `getTokenBalances`, `quoteTransfer`,
 `quoteSendTransaction`, `getTransaction`, `waitForTransaction`,
-`getTransactionReceipt` and `verify`.
+`getTransactionReceipt`, `getIbcChannels`, `getDenomTrace` and `verify`.
 
 `quoteTransfer` and unsigned `quoteSendTransaction` use a fixed gas limit of
 `200000`: simulation needs the sender's public key, which a watch-only account
