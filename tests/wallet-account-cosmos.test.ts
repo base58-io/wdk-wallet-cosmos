@@ -32,6 +32,7 @@ import {
 import { connectComet } from '@cosmjs/tendermint-rpc'
 import { fromBech32, toBech32 } from '@cosmjs/encoding'
 import { ServiceClientImpl } from 'cosmjs-types/cosmos/tx/v1beta1/service'
+import { QueryDenomTraceResponse } from 'cosmjs-types-ibc-v8/ibc/applications/transfer/v1/query.js'
 import { State as ChannelState } from 'cosmjs-types/ibc/core/channel/v1/channel'
 import { ClientState as TendermintClientState } from 'cosmjs-types/ibc/lightclients/tendermint/v1/tendermint'
 import {
@@ -111,6 +112,11 @@ function expectSimulated(
   expect(tx.body?.memo).toBe(memo)
   expect(tx.authInfo?.fee?.amount).toEqual([{ denom: 'stake', amount: '1' }])
 }
+
+// An `ibc/<hash>` denom, and its hash as the chain's Denom query takes it.
+const IBC_DENOM_HASH =
+  '27394FB092D2ECCD56123C74F36E4C1F926001CEADA9CA97EA622B25F41E5EB2'
+const IBC_DENOM = `ibc/${IBC_DENOM_HASH}`
 
 /** Builds an `IdentifiedChannel` as the chain's Channels query returns it. */
 function createChannel(
@@ -1144,6 +1150,101 @@ describe('WalletAccountCosmos', () => {
         )
         await expect(aliceAccount.getIbcChannels()).resolves.toHaveLength(1)
       })
+    })
+  })
+
+  describe('getDenomTrace', () => {
+    it('should return null for a native denom without querying the chain', async () => {
+      await expect(aliceAccount.getDenomTrace('stake')).resolves.toBeNull()
+      expect(connectComet).not.toHaveBeenCalled()
+    })
+
+    it('should trace an IBC denom to the chain it arrived from', async () => {
+      const denomTrace = vi.fn().mockResolvedValue({
+        denom: {
+          base: 'uatom',
+          trace: [
+            { portId: 'transfer', channelId: 'channel-0' },
+            { portId: 'transfer', channelId: 'channel-141' },
+          ],
+        },
+      })
+      const ibc = createIbcQueries([], { 'channel-0': 'osmosis-1' }, denomTrace)
+
+      const trace = await withStubbedIbc(ibc, () =>
+        aliceAccount.getDenomTrace(IBC_DENOM)
+      )
+
+      expect(denomTrace).toHaveBeenCalledWith(IBC_DENOM_HASH)
+      expect(ibc.channel.clientState).toHaveBeenCalledWith(
+        'transfer',
+        'channel-0'
+      )
+      expect(trace).toEqual({
+        baseDenom: 'uatom',
+        path: [
+          { portId: 'transfer', channelId: 'channel-0' },
+          { portId: 'transfer', channelId: 'channel-141' },
+        ],
+        sourceChainId: 'osmosis-1',
+      })
+    })
+
+    it('should fall back to the DenomTrace query on chains before ibc-go v10', async () => {
+      const denomTrace = vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Query failed with (6): unknown query path: unknown request')
+        )
+      const ibc = createIbcQueries([], { 'channel-0': 'cosmoshub-4' }, denomTrace)
+      const response = QueryDenomTraceResponse.encode({
+        denomTrace: {
+          path: 'transfer/channel-0/transfer/channel-7',
+          baseDenom: 'uatom',
+        },
+      }).finish()
+      const queryAbci = vi
+        .spyOn(QueryClient.prototype, 'queryAbci')
+        .mockResolvedValue({ value: response, height: 1 })
+
+      try {
+        const trace = await withStubbedIbc(ibc, () =>
+          aliceAccount.getDenomTrace(IBC_DENOM)
+        )
+
+        expect(queryAbci).toHaveBeenCalledWith(
+          '/ibc.applications.transfer.v1.Query/DenomTrace',
+          expect.any(Uint8Array),
+          undefined
+        )
+        expect(trace).toEqual({
+          baseDenom: 'uatom',
+          path: [
+            { portId: 'transfer', channelId: 'channel-0' },
+            { portId: 'transfer', channelId: 'channel-7' },
+          ],
+          sourceChainId: 'cosmoshub-4',
+        })
+      } finally {
+        queryAbci.mockRestore()
+      }
+    })
+
+    it('should query each denom once per account', async () => {
+      const denomTrace = vi.fn().mockResolvedValue({
+        denom: {
+          base: 'uatom',
+          trace: [{ portId: 'transfer', channelId: 'channel-0' }],
+        },
+      })
+      const ibc = createIbcQueries([], { 'channel-0': 'osmosis-1' }, denomTrace)
+
+      await withStubbedIbc(ibc, async () => {
+        await aliceAccount.getDenomTrace(IBC_DENOM)
+        await aliceAccount.getDenomTrace(IBC_DENOM)
+      })
+
+      expect(denomTrace).toHaveBeenCalledOnce()
     })
   })
 

@@ -241,6 +241,16 @@ describe('WalletAccountCosmos (chain-backed)', () => {
         )
         expect(bobVoucherAfter - bobVoucherBefore).toBe(BigInt(transferAmount))
 
+        await expect(
+          chain2BobAccount.getDenomTrace(voucherDenom)
+        ).resolves.toEqual({
+          baseDenom: 'stake',
+          path: [
+            { portId: 'transfer', channelId: channel.counterpartyChannelId },
+          ],
+          sourceChainId: 'wdkdev',
+        })
+
         // Sending the voucher back routes through ibcChains' `wdk` entry.
         const aliceStakeBefore = await chain1AliceAccount.getBalance('stake')
         const returnResult = await chain2BobAccount.transfer({
